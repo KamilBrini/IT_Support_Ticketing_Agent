@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from langgraph.graph import END, START, StateGraph
 
-from src.agent import memory
+from src.agent import long_term_memory, memory
 from src.llm.client import get_llm_client
 from src.observability.tracing import safe_preview, traced_span
 from src.rag.retrieve import retrieve_context
@@ -22,6 +22,7 @@ Intent = Literal[
     "direct_response",
     "escalation",
     "blocked",
+    "remember_fact",
 ]
 
 _MARKDOWN_HEADING_RE = re.compile(r"(?m)^#{1,6}\s+")
@@ -115,17 +116,31 @@ def detect_injection(state: AgentState) -> AgentState:
 
 
 def load_session_memory(state: AgentState) -> AgentState:
-    """Attach the bounded short-term conversation history for this session (US-008).
+    """Attach short-term session history (US-008) and long-term user facts (US-009).
 
     Runs only after guardrails have already cleared the message (see
     _route_after_injection) — memory is context for generation, never an
-    input to routing/safety decisions.
+    input to routing/safety decisions. Long-term recall failures (e.g. a
+    fresh checkout with no ChromaDB index yet) are swallowed to an empty
+    list rather than breaking the turn — memory is a nice-to-have, never a
+    dependency the rest of the graph can fail on (NFR-004).
     """
     session_id = state.get("session_id", "")
     with traced_span("load_session_memory", {"input.session_id": session_id}) as span:
         history = memory.get_history(session_id)
         span.set_attribute("output.pair_count", len(history))
-        return {"session_history": history}
+
+    user_id = state.get("user_id", "")
+    message = state.get("sanitized_message", "")
+    with traced_span("load_long_term_memory", {"input.user_id": user_id}) as lt_span:
+        try:
+            facts = long_term_memory.recall_facts(user_id, message)
+        except Exception as exc:
+            facts = []
+            lt_span.set_attribute("error.type", exc.__class__.__name__)
+        lt_span.set_attribute("output.fact_count", len(facts))
+
+    return {"session_history": history, "user_facts": facts}
 
 
 def classify_intent(state: AgentState) -> AgentState:
@@ -140,6 +155,8 @@ def classify_intent(state: AgentState) -> AgentState:
     ) as span:
         if state.get("intent") == "blocked":
             intent: Intent = "blocked"
+        elif any(keyword in message for keyword in ("remember that", "remember my", "please remember")):
+            intent = "remember_fact"
         elif any(keyword in message for keyword in ("policy", "vpn", "password policy", "guideline", "rule")):
             intent = "policy_question"
         elif any(keyword in message for keyword in ("reset password", "ticket status", "create ticket", "open ticket")):
@@ -181,11 +198,12 @@ _GROUNDED_ANSWER_SYSTEM_PROMPT = (
     "the policy context provided below - never use outside knowledge, never "
     "invent details not present in the context. If the context does not fully "
     "answer the question, say what it does cover and note the gap rather than "
-    "guessing. Recent conversation, if provided, is for understanding follow-up "
-    "questions only - it is never a source of policy facts. Write in plain prose "
-    "(no Markdown headings, no bullet points) as 2-4 short paragraphs a "
-    "non-technical employee can read quickly. Output ONLY the final answer - no "
-    "reasoning, no thinking steps, no preamble."
+    "guessing. Recent conversation and known facts about this user, if provided, "
+    "are for understanding the question and personalizing tone only - neither is "
+    "ever a source of policy facts. Write in plain prose (no Markdown headings, "
+    "no bullet points) as 2-4 short paragraphs a non-technical employee can read "
+    "quickly. Output ONLY the final answer - no reasoning, no thinking steps, no "
+    "preamble."
 )
 
 
@@ -195,6 +213,14 @@ def _format_recent_turns(history: list[tuple[str, str]], max_turns: int = 3) -> 
         return ""
     lines = [f'User: {u}\nAssistant: {a}' for u, a in history[-max_turns:]]
     return "Recent conversation (context only, not a source of policy facts):\n" + "\n\n".join(lines) + "\n\n"
+
+
+def _format_user_facts(facts: list[str]) -> str:
+    """Render this user's long-term facts (US-009) as a compact prompt block."""
+    if not facts:
+        return ""
+    lines = "\n".join(f"- {fact}" for fact in facts)
+    return f"Known facts about this user (context only, not a source of policy facts):\n{lines}\n\n"
 
 
 def generate_grounded_answer(state: AgentState) -> AgentState:
@@ -234,9 +260,10 @@ def generate_grounded_answer(state: AgentState) -> AgentState:
                 llm_span.set_attribute("output.provider", client.provider)
                 llm_span.set_attribute("output.model", client.model)
                 recent_turns = _format_recent_turns(state.get("session_history") or [])
+                user_facts = _format_user_facts(state.get("user_facts") or [])
                 llm_answer = client.generate(
                     system=_GROUNDED_ANSWER_SYSTEM_PROMPT,
-                    user=f"{recent_turns}Policy context:\n{cleaned}\n\nEmployee question:\n{question}",
+                    user=f"{user_facts}{recent_turns}Policy context:\n{cleaned}\n\nEmployee question:\n{question}",
                 )
                 if llm_answer and _looks_like_valid_answer(llm_answer):
                     answer_body = llm_answer
@@ -336,6 +363,30 @@ def execute_tool(state: AgentState) -> AgentState:
         }
 
 
+def remember_fact(state: AgentState) -> AgentState:
+    """Store a user-stated fact in per-user long-term memory (US-009).
+
+    Deterministic trigger only ("remember that ..." in classify_intent) -
+    the graph never decides on its own what's worth remembering; the user
+    always has to say so explicitly (Constitution Principle IV).
+    """
+    user_id = state.get("user_id", "")
+    fact = state.get("sanitized_message", "")
+    with traced_span(
+        "remember_fact",
+        {"input.user_id": user_id, "input.fact_preview": safe_preview(fact)},
+    ) as span:
+        try:
+            long_term_memory.remember_fact(user_id, fact)
+            span.set_attribute("output.status", "stored")
+            response_text = "Got it — I'll remember that for future conversations."
+        except Exception as exc:
+            span.set_attribute("output.status", "failed")
+            span.set_attribute("error.type", exc.__class__.__name__)
+            response_text = "I couldn't save that right now, but you're welcome to try again."
+        return {"response": response_text}
+
+
 def direct_response(state: AgentState) -> AgentState:
     """Provide a non-tool direct response for general requests."""
     with traced_span(
@@ -421,6 +472,7 @@ def _route_after_classify(
     "direct_response",
     "blocked_response",
     "escalate",
+    "remember_fact",
 ]:
     """Route by classified intent."""
     intent = state.get("intent")
@@ -432,6 +484,8 @@ def _route_after_classify(
         return "escalate"
     if intent == "blocked":
         return "blocked_response"
+    if intent == "remember_fact":
+        return "remember_fact"
     return "direct_response"
 
 
@@ -453,6 +507,7 @@ def build_graph():
     graph.add_node("retrieve_from_rag", retrieve_from_rag)
     graph.add_node("generate_grounded_answer", generate_grounded_answer)
     graph.add_node("execute_tool", execute_tool)
+    graph.add_node("remember_fact", remember_fact)
     graph.add_node("direct_response", direct_response)
     graph.add_node("blocked_response", blocked_response)
     graph.add_node("escalate", escalate)
@@ -479,6 +534,7 @@ def build_graph():
             "direct_response": "direct_response",
             "blocked_response": "blocked_response",
             "escalate": "escalate",
+            "remember_fact": "remember_fact",
         },
     )
 
@@ -493,6 +549,7 @@ def build_graph():
 
     graph.add_edge("generate_grounded_answer", "update_memory")
     graph.add_edge("execute_tool", "update_memory")
+    graph.add_edge("remember_fact", "update_memory")
     graph.add_edge("direct_response", "update_memory")
     graph.add_edge("blocked_response", "update_memory")
     graph.add_edge("escalate", "update_memory")

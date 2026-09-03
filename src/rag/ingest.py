@@ -9,7 +9,8 @@ from pathlib import Path
 
 import chromadb
 from chromadb.api.models.Collection import Collection
-from chromadb.utils import embedding_functions
+
+from src.rag.embeddings import build_embedding_function
 
 COLLECTION_NAME = "it_policy_docs"
 DEFAULT_POLICIES_DIR = Path("data/policies")
@@ -57,26 +58,9 @@ def _chunk_text(text: str, size: int = CHUNK_SIZE_TOKENS, overlap: int = CHUNK_O
     return chunks
 
 
-def _build_embedding_function() -> embedding_functions.EmbeddingFunction:
-    """Use OpenAI embeddings when a key is configured, else a local offline model.
-
-    The local default (all-MiniLM-L6-v2 via chromadb's DefaultEmbeddingFunction)
-    requires no API key and no network access, so ingestion/retrieval keep
-    working even when only a non-OpenAI provider key (e.g. NVIDIA NIM) is set.
-    """
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if api_key:
-        return embedding_functions.OpenAIEmbeddingFunction(
-            api_key=api_key,
-            model_name="text-embedding-3-small",
-        )
-
-    return embedding_functions.DefaultEmbeddingFunction()
-
-
 def _get_collection(client: chromadb.PersistentClient) -> Collection:
     """Get or create the target Chroma collection."""
-    embedding_fn = _build_embedding_function()
+    embedding_fn = build_embedding_function()
     return client.get_or_create_collection(
         name=COLLECTION_NAME,
         embedding_function=embedding_fn,

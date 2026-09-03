@@ -1,26 +1,26 @@
 # Build Roadmap
 
-Status snapshot: 2026-09-04 (demo day). Each checkpoint lists a **prompt to give Claude**, what it should produce, and **how to verify it yourself** before moving on. Checkpoints map to `tasks.md` Phase 17 and the still-open user stories (US-009, US-014, US-015) in `specs/001-it-support-ticketing-system/spec.md`.
+Status snapshot: 2026-09-04 (demo day). Each checkpoint lists a **prompt to give Claude**, what it should produce, and **how to verify it yourself** before moving on. Checkpoints map to `tasks.md` Phase 17 and the still-open user stories (US-014, US-015) in `specs/001-it-support-ticketing-system/spec.md`.
 
 ## Where things stand right now
 
 **Real and verified (2026-09-04):**
 - FastAPI backend (`/chat`, `/health`, `/tickets/{id}`), Streamlit frontend, both run and talk to each other over REST.
-- LangGraph 10-node workflow: PII redaction → injection guard → session memory → intent classification → RAG / tool / direct / blocked / escalate → response. **Routing/classification/guardrails are deterministic keyword rules by design** (Principle IV); **`generate_grounded_answer` calls NVIDIA NIM (Nemotron)** for real, with an automatic fallback to the deterministic template on any API failure or degenerate output.
+- LangGraph 11-node workflow: PII redaction → injection guard → session + long-term memory → intent classification → RAG / tool / remember-fact / direct / blocked / escalate → response. **Routing/classification/guardrails are deterministic keyword rules by design** (Principle IV); **`generate_grounded_answer` calls NVIDIA NIM (Nemotron)** for real, with an automatic fallback to the deterministic template on any API failure or degenerate output.
 - RAG: ChromaDB retrieval over `data/policies/*.md`, local offline embedding model (no API key needed), plus a relevance-distance cutoff so off-topic questions correctly escalate instead of grounding in the nearest-but-wrong chunk.
 - FastMCP tools: `get_ticket_status` (real ticket-ID extraction from the message), `request_password_reset`, `create_ticket` — in-memory seeded data, real Pydantic validation, results flow through as structured data (not stringified) with a clean human-readable summary.
-- PII redaction + prompt injection guard: regex/keyword-based, real and tested (`tests/test_pii_redaction.py`).
+- PII redaction + prompt injection guard: regex/keyword-based, real and tested.
 - Session memory (US-008): `src/agent/memory.py`, 6-turn sliding window per session, feeds the last 3 turns into the LLM prompt. Non-durable (in-process dict).
+- Long-term memory (US-009): `src/agent/long_term_memory.py`, per-user ChromaDB collection, persisted on disk, explicit "remember that ..." trigger. Verified live across a fresh session and cross-user isolation — see Checkpoint 4b.
 - Promptfoo suite: 10/10 passing, real live run against the running backend, committed to `eval/results.json` (two false-negative assertions found and fixed along the way — see `docs/demo_script.md` bug log #10).
 - Phoenix tracing: wired into every node including a `llm_call` span (provider, model, status), fails safe when no collector is running, batched (non-blocking) export.
 - Git: repo initialized, work committed (was previously **zero** git history — a real gap now closed).
 - `docs/SDD.md`, `docs/architecture.png`, `docs/langgraph_state.png`: written/generated and committed.
+- Test coverage: 97 pytest tests across PII redaction, injection guard, all three FastMCP tools, Pydantic schemas, and full LangGraph node/routing logic including both memory systems (`NFR-008`).
 
 **Spec'd but not built:**
 - Gemini/OpenAI adapters behind the same `LLMClient` interface (Checkpoint 2 below) — NVIDIA NIM only for now.
 - `search_external_knowledge` FastMCP tool (US-015).
-- Long-term per-user memory across sessions (US-009) — not built. (Short-term session memory, US-008, is done — see Checkpoint 4a.)
-- Test coverage beyond PII redaction: injection guard, tools, graph routing, RAG retrieval, schemas, LLM client (`NFR-008`).
 - `docs/trace_screenshot.png` — not captured yet (needs a live Phoenix run to screenshot).
 
 ---
@@ -70,19 +70,23 @@ Verified: trim logic unit-tested (9 turns in → exactly the last 6 kept, oldest
 
 ---
 
-## Checkpoint 4b (open) — Long-term memory (US-009)
+## ✅ Checkpoint 4b — DONE (2026-09-04): Long-term memory (US-009)
 
-**Prompt**: *"Add a per-user ChromaDB collection (`user_memory_{user_id}`) for long-term safe-fact recall (office region, preferred device type, etc.), per plan.md §11.2. Never store passwords, secrets, or raw PII."*
+`src/agent/long_term_memory.py`: a per-user ChromaDB collection (`user_memory_{user_id}`), persisted on disk (survives a backend restart, unlike Checkpoint 4a's in-process session window). Storage is deterministic and explicit only — triggered by the user saying "remember that ..." / "remember my ..." / "please remember ..." (new `remember_fact` intent and graph node) — never an automatic LLM inference, consistent with Principle IV. `load_session_memory` now also recalls relevant facts for the current question and threads them into `generate_grounded_answer`'s prompt as a clearly-labeled "known facts about this user, never a source of policy" block.
 
-**Verify**: confirm two different `user_id`s never see each other's long-term facts (tenant isolation test); confirm a stored fact is retrieved and influences a later response in a **new** session (proving it's cross-session, unlike Checkpoint 4a's per-session memory).
+**Verified live** (2026-09-04, real backend, real NVIDIA NIM):
+- Stored "I work from the London office on a MacBook Pro." in one session.
+- A **different, brand-new session** (same `user_id`) asking a VPN policy question got an answer that correctly referenced "your London office network" and "Since you are on a MacBook Pro" — proving genuine cross-session recall, not session-scoped memory bleeding through.
+- The same question asked as a **different `user_id`** got the same policy answer with zero personalization — confirming per-user isolation (each user gets their own Chroma collection).
+- An unrelated policy question (software licensing) correctly did **not** pull in the stored fact — the distance-based relevance filter (`MAX_RELEVANT_DISTANCE = 1.6` in `long_term_memory.py`, recalibrated from the RAG module's 1.2 since short single-sentence facts score higher distances even when genuinely relevant) keeps recall targeted.
+
+**Known limitation**: like session memory, recall only reaches the model on the `policy_question` path (inside `generate_grounded_answer`) — a pure `direct_response` question doesn't consult stored facts, since routing is still keyword-based (Principle IV).
 
 ---
 
-## Checkpoint 5 — Close the test-coverage gap
+## ✅ Checkpoint 5 — DONE (2026-09-04): Close the test-coverage gap
 
-**Prompt**: *"Add unit tests for the injection guard, all three FastMCP tools, LangGraph routing (all 5 intents + blocked path), RAG retrieval, and Pydantic schema validation, matching NFR-008 and the Definition of Done's 'Testing Complete' checklist."*
-
-**Verify**: `pytest -q` — all green, and manually confirm each file in `tests/` maps to a real DoD bullet, not just line coverage.
+Added `tests/test_injection_guard.py`, `tests/test_mcp_tools.py`, `tests/test_schemas.py`, `tests/test_graph_routing.py`, `tests/test_rag_retrieve.py`, `tests/test_long_term_memory.py`. 97 passing (up from 4). LLM calls are monkeypatched in the graph-routing tests so the suite stays fast, deterministic, and free — no real NVIDIA NIM traffic, no test ever depends on network access except the ChromaDB-backed RAG/long-term-memory tests, which run against the real local (offline) index.
 
 ---
 
@@ -104,4 +108,4 @@ Promptfoo suite ran live against the real backend: 10/10 passing, saved to `eval
 
 ## Suggested order given the Friday deadline
 
-Checkpoints 1 (LLM) and 4a (session memory) are done and demo-ready — see `docs/demo_script.md` Scenes 2 and 2a. Git, Promptfoo, and the doc/PNG exports (Checkpoints 6-7) are also done. What's left, in order of value if there's time before or after the demo: 5 (test coverage — protects against silent regressions) → 6's remaining item (trace screenshot — five minutes, do it once Phoenix is running anyway) → 2 (Gemini/OpenAI adapters) → 3 (external search tool) → 4b (long-term memory). None of the remaining items block presenting what's already built.
+Checkpoints 1, 4a, 4b, 5, 6, and 7 are all done and demo-ready — see `docs/demo_script.md` Scenes 2, 2a, and 2b. What's left, in rough order of value: 6's one remaining item (trace screenshot — five minutes, do it once Phoenix is running anyway) → 2 (Gemini/OpenAI adapters) → 3 (external search tool). Neither remaining checkpoint blocks presenting what's already built.

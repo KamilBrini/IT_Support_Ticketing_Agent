@@ -4,6 +4,7 @@ flowchart TD
     Redact["PII Redaction\nsrc/security/pii_redaction.py"]
     Guard["Injection Guard\nsrc/security/injection_guard.py"]
     Mem["Session Memory\nsrc/agent/memory.py\n6-turn sliding window per session_id"]
+    LTM[("Long-Term Memory\nsrc/agent/long_term_memory.py\nper-user ChromaDB collection,\npersisted, explicit 'remember that' trigger")]
     Graph["LangGraph Orchestrator\nsrc/agent/graph.py"]
     RAG["RAG Retriever\nsrc/rag/retrieve.py\nrelevance-distance cutoff"]
     KB[("ChromaDB\ndata/policies, local offline\nembeddings by default")]
@@ -15,6 +16,7 @@ flowchart TD
 
     UI -->|"REST POST /chat"| API
     API --> Redact --> Guard --> Mem --> Graph
+    Graph <-->|"recall / remember_fact"| LTM
     Graph -->|"policy_question"| RAG --> KB
     Graph -->|"action_request"| Tools
     Graph -->|"grounded-answer generation"| LLM

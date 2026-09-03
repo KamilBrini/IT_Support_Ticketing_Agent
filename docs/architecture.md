@@ -13,6 +13,7 @@ flowchart TD
     Redact["PII Redaction\nsrc/security/pii_redaction.py"]
     Guard["Injection Guard\nsrc/security/injection_guard.py"]
     Mem["Session Memory\nsrc/agent/memory.py\n6-turn sliding window per session_id"]
+    LTM[("Long-Term Memory\nsrc/agent/long_term_memory.py\nper-user ChromaDB collection,\npersisted, explicit 'remember that' trigger")]
     Graph["LangGraph Orchestrator\nsrc/agent/graph.py"]
     RAG["RAG Retriever\nsrc/rag/retrieve.py\nrelevance-distance cutoff"]
     KB[("ChromaDB\ndata/policies, local offline\nembeddings by default")]
@@ -24,6 +25,7 @@ flowchart TD
 
     UI -->|"REST POST /chat"| API
     API --> Redact --> Guard --> Mem --> Graph
+    Graph <-->|"recall / remember_fact"| LTM
     Graph -->|"policy_question"| RAG --> KB
     Graph -->|"action_request"| Tools
     Graph -->|"grounded-answer generation"| LLM
@@ -43,13 +45,14 @@ flowchart TD
     START([START]) --> A[redact_pii]
     A --> B[detect_injection]
     B -->|suspicious| BR[blocked_response]
-    B -->|safe| LSM[load_session_memory]
+    B -->|safe| LSM["load_session_memory\n(+ recall long-term facts)"]
     LSM --> C[classify_intent]
 
     C -->|policy_question| D[retrieve_from_rag]
     C -->|action_request| E[execute_tool]
     C -->|escalation| ESC[escalate]
     C -->|blocked| BR
+    C -->|remember_fact| RF[remember_fact]
     C -->|direct_response default| DR[direct_response]
 
     D -->|context found| F[generate_grounded_answer]
@@ -59,6 +62,7 @@ flowchart TD
     LLMNOTE["LLMClient.generate() (Nemotron)\nfalls back to template on\nfailure/degenerate output"] --> F
     F --> UM[update_memory]
     E --> UM
+    RF --> UM
     DR --> UM
     BR --> UM
     ESC --> UM
@@ -68,7 +72,7 @@ flowchart TD
     class SEARCH planned;
 ```
 
-**Note vs. the original spec's LangGraph diagram** (`specs/001-it-support-ticketing-system/plan.md`): `load_session_memory` (US-008) and the real `LLMClient.generate()` call inside `generate_grounded_answer` are both now shipped and live. `classify_intent` and `execute_tool` routing remain deterministic keyword rules by design (Constitution Principle IV — guardrails/routing run before any model call), not a gap. There is still no separate `validate_structured_output` gate — Pydantic validation happens inline in the tool schemas (`src/schemas/models.py`) instead of as its own graph node.
+**Note vs. the original spec's LangGraph diagram** (`specs/001-it-support-ticketing-system/plan.md`): `load_session_memory` (US-008, now also recalling long-term facts for US-009), the `remember_fact` node (US-009's write path), and the real `LLMClient.generate()` call inside `generate_grounded_answer` are all now shipped and live. `classify_intent` and `execute_tool` routing remain deterministic keyword rules by design (Constitution Principle IV — guardrails/routing run before any model call), not a gap — the `remember_fact` intent is triggered by an explicit user phrase ("remember that ..."), never inferred automatically. There is still no separate `validate_structured_output` gate — Pydantic validation happens inline in the tool schemas (`src/schemas/models.py`) instead of as its own graph node.
 
 ## PNG exports for the submission checklist
 

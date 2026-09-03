@@ -2,13 +2,14 @@ flowchart TD
     START([START]) --> A[redact_pii]
     A --> B[detect_injection]
     B -->|suspicious| BR[blocked_response]
-    B -->|safe| LSM[load_session_memory]
+    B -->|safe| LSM["load_session_memory\n(+ recall long-term facts)"]
     LSM --> C[classify_intent]
 
     C -->|policy_question| D[retrieve_from_rag]
     C -->|action_request| E[execute_tool]
     C -->|escalation| ESC[escalate]
     C -->|blocked| BR
+    C -->|remember_fact| RF[remember_fact]
     C -->|direct_response default| DR[direct_response]
 
     D -->|context found| F[generate_grounded_answer]
@@ -18,6 +19,7 @@ flowchart TD
     LLMNOTE["LLMClient.generate() (Nemotron)\nfalls back to template on\nfailure/degenerate output"] --> F
     F --> UM[update_memory]
     E --> UM
+    RF --> UM
     DR --> UM
     BR --> UM
     ESC --> UM

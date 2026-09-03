@@ -6,7 +6,8 @@ import os
 from pathlib import Path
 
 import chromadb
-from chromadb.utils import embedding_functions
+
+from src.rag.embeddings import build_embedding_function
 
 COLLECTION_NAME = "it_policy_docs"
 DEFAULT_CHROMA_PATH = Path("./data/chroma")
@@ -20,20 +21,6 @@ DEFAULT_CHROMA_PATH = Path("./data/chroma")
 MAX_RELEVANT_DISTANCE = 1.2
 
 
-def _build_embedding_function() -> embedding_functions.EmbeddingFunction:
-    """Use OpenAI embeddings when a key is configured, else the same local
-    offline model used at ingestion time (must match, or query vectors won't
-    line up with stored vectors)."""
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if api_key:
-        return embedding_functions.OpenAIEmbeddingFunction(
-            api_key=api_key,
-            model_name="text-embedding-3-small",
-        )
-
-    return embedding_functions.DefaultEmbeddingFunction()
-
-
 def retrieve_context(query: str, k: int = 3) -> list[str]:
     """Query it_policy_docs and return top-k matching chunk texts."""
     if not query.strip():
@@ -45,7 +32,7 @@ def retrieve_context(query: str, k: int = 3) -> list[str]:
 
     collection = client.get_or_create_collection(
         name=COLLECTION_NAME,
-        embedding_function=_build_embedding_function(),
+        embedding_function=build_embedding_function(),
     )
 
     result = collection.query(query_texts=[query], n_results=k, include=["documents", "distances"])

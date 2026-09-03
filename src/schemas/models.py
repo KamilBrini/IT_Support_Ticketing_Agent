@@ -363,3 +363,4 @@ class AgentState(TypedDict):
     tool_result: NotRequired[dict[str, Any] | None]
     response: NotRequired[str | None]
     session_history: NotRequired[list[tuple[str, str]]]
+    user_facts: NotRequired[list[str]]

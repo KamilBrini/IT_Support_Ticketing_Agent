@@ -30,6 +30,8 @@ from src.agent import graph as graph_module
         ("I want to talk to my manager about this.", "escalation"),
         ("Please escalate this to security.", "escalation"),
         ("What's the weather like today?", "direct_response"),
+        ("Remember that I work from the London office.", "remember_fact"),
+        ("Please remember I use a MacBook Pro.", "remember_fact"),
     ],
 )
 def test_classify_intent(message: str, expected_intent: str) -> None:
@@ -89,6 +91,7 @@ def test_route_after_injection_safe() -> None:
         ("escalation", "escalate"),
         ("blocked", "blocked_response"),
         ("direct_response", "direct_response"),
+        ("remember_fact", "remember_fact"),
         (None, "direct_response"),
     ],
 )
@@ -265,6 +268,77 @@ def test_update_memory_persists_normal_turn(monkeypatch: pytest.MonkeyPatch) -> 
     }
     graph_module.update_memory(state)
     assert calls == [("s-1", "What is our VPN policy?", state["response"])]
+
+
+# --- remember_fact / long-term memory (US-009) --------------------------------------------------------
+
+
+def test_remember_fact_node_stores_and_confirms(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        graph_module.long_term_memory,
+        "remember_fact",
+        lambda user_id, fact: calls.append((user_id, fact)),
+    )
+    state = {"user_id": "u-1", "sanitized_message": "Remember that I work from the London office."}
+    result = graph_module.remember_fact(state)
+    assert calls == [("u-1", "Remember that I work from the London office.")]
+    assert "remember" in result["response"].lower()
+
+
+def test_remember_fact_node_fails_safe_on_storage_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(user_id: str, fact: str) -> None:
+        raise RuntimeError("chromadb unavailable")
+
+    monkeypatch.setattr(graph_module.long_term_memory, "remember_fact", _raise)
+    state = {"user_id": "u-1", "sanitized_message": "Remember that I work from the London office."}
+    result = graph_module.remember_fact(state)
+    assert "couldn't save" in result["response"]
+
+
+def test_load_session_memory_includes_recalled_facts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(graph_module.memory, "get_history", lambda session_id: [])
+    monkeypatch.setattr(
+        graph_module.long_term_memory,
+        "recall_facts",
+        lambda user_id, query, k=3: ["I work from the London office on a MacBook Pro."],
+    )
+    state = {"session_id": "s-1", "user_id": "u-1", "sanitized_message": "What laptop do I have?"}
+    result = graph_module.load_session_memory(state)
+    assert result["user_facts"] == ["I work from the London office on a MacBook Pro."]
+
+
+def test_load_session_memory_fails_safe_when_recall_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(graph_module.memory, "get_history", lambda session_id: [])
+
+    def _raise(user_id: str, query: str, k: int = 3) -> list[str]:
+        raise RuntimeError("chromadb unavailable")
+
+    monkeypatch.setattr(graph_module.long_term_memory, "recall_facts", _raise)
+    state = {"session_id": "s-1", "user_id": "u-1", "sanitized_message": "What laptop do I have?"}
+    result = graph_module.load_session_memory(state)
+    assert result["user_facts"] == []
+
+
+def test_generate_grounded_answer_includes_user_facts_in_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, str] = {}
+
+    class _FakeClient:
+        provider = "fake"
+        model = "fake-model"
+
+        def generate(self, *, system: str, user: str, **_: object) -> str:
+            captured["user"] = user
+            return "Employees may install approved software after submitting a request for review."
+
+    monkeypatch.setattr(graph_module, "get_llm_client", lambda: _FakeClient())
+    state = {
+        "sanitized_message": "What software am I allowed to install?",
+        "retrieved_context": "# Software Policy\nOnly approved software may be installed.",
+        "user_facts": ["This employee works from the London office."],
+    }
+    graph_module.generate_grounded_answer(state)
+    assert "London office" in captured["user"]
 
 
 def test_update_memory_skips_blocked_turns(monkeypatch: pytest.MonkeyPatch) -> None:

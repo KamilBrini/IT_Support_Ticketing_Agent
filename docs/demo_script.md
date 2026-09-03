@@ -1,6 +1,6 @@
 # Demo Script — IT Support Ticketing System
 
-**Prepared**: 2026-09-02, updated 2026-09-04 | **Target demo date**: Friday 2026-09-04 | **Scope**: real RAG + real NVIDIA NIM (Nemotron) generation for policy answers; routing/guardrails remain deterministic by design (see Principle IV note below). Session memory (US-008) is now live — see Scene 2a. Long-term cross-session memory (US-009) is still not implemented — see "What NOT to claim."
+**Prepared**: 2026-09-02, updated 2026-09-04 | **Target demo date**: Friday 2026-09-04 | **Scope**: real RAG + real NVIDIA NIM (Nemotron) generation for policy answers; routing/guardrails remain deterministic by design (see Principle IV note below). Session memory (US-008) and long-term cross-session memory (US-009) are both live — see Scenes 2a and 2b.
 
 This walks the same scenarios covered by `eval/promptfooconfig.yaml`, so nothing in this script is untested — every step below was run and verified on 2026-09-02. Run the **T-30 setup** the morning of the demo (not the night before) so the ONNX model cache and Chroma index are warm on the actual demo machine.
 
@@ -15,6 +15,7 @@ This walks the same scenarios covered by `eval/promptfooconfig.yaml`, so nothing
 > 8. `.env` was never loaded by the running app (no `load_dotenv()` call anywhere), so values set there had no effect. Now loaded at backend startup; `GET /health` reports `nvidia_nim_key_configured: true/false` (boolean only, never the value) so you can confirm your key was picked up without exposing it anywhere.
 > 9. **Session memory (US-008) shipped 2026-09-04**: a `load_session_memory` graph node now feeds the last 3 turns into the LLM prompt as conversation context, so follow-up questions stay coherent within a session. Not durable — an in-process dict, cleared on backend restart.
 > 10. **Two Promptfoo assertions were false negatives**, found while producing `eval/results.json`: the 3 injection tests were grading the *entire* JSON response body (which echoes the original message elsewhere) instead of just the `response` field, so a phrase like "hidden admin credentials" in the echoed input tripped a `not-contains` check even though the model never said it — fixed via `transformResponse` scoping the grade to `response` only. The unknown-ticket edge case checked for the literal string "not found" but the real (correct) wording is "could not find" — fixed the assertion to match. Suite is now a real, live-verified 10/10.
+> 11. **Long-term memory (US-009) shipped 2026-09-04**: a per-user ChromaDB collection recalls facts the user explicitly asks to be remembered ("remember that ..."), persisted on disk so it survives a backend restart and follows the user across sessions. Verified live: a fact stored in one session correctly personalized a policy answer in a brand-new session for the same user, while a different user asking the identical question got zero personalization.
 
 ---
 
@@ -119,6 +120,13 @@ Type each into the Streamlit chat box:
 **Expected**: the second answer stays on-topic (VPN/access policy) and, if the retrieved policy text doesn't specifically mention contractors, honestly says so rather than fabricating a rule — it does not restart the conversation from zero. **Talking point**: "The last 6 turns of this session are held in `src/agent/memory.py` and fed into the model as context, but the retrieved policy text is still the only source of *facts* — memory affects phrasing and continuity, never grounding."
 **Known limitation, mention only if asked**: routing to RAG in the first place still depends on keyword matching (Constitution Principle IV), so a follow-up with zero policy keywords could theoretically miss the RAG branch — memory helps *within* an already-routed conversation, it doesn't change routing itself.
 
+### Scene 2b — Long-term memory across sessions (US-009)
+1. `Remember that I work from the London office on a MacBook Pro.` → expect *"Got it — I'll remember that for future conversations."*
+2. **In the sidebar, edit the "Session ID" field to any new value** (e.g. add `-2` to the end) and press Enter — this is a genuinely new `session_id`, so session memory (Scene 2a) has nothing to draw on here. Then ask: `What does VPN policy require for remote access from my office and device?`
+
+**Expected**: the answer references your London office and MacBook Pro specifically, even though this is a session that has never seen those words — proof the fact was recalled from persisted per-user storage, not just carried over in the same chat window. **Talking point**: "Unlike Scene 2a's session memory, this is stored in a per-user ChromaDB collection on disk — it survives a backend restart and follows the user across sessions, but only ever stores what the user explicitly asks it to remember, never an automatic inference (Constitution Principle IV)."
+**If asked about isolation**: each user gets their own collection (`user_memory_{user_id}`), verified live — a different user_id asking the identical question gets zero personalization.
+
 ### Scene 3 — Tool actions (FastMCP)
 1. `Check ticket status for TCK-1001` → renders a blue "Ticket Status" info card (open, network-ops queue).
 2. `Check ticket status for TCK-9999` → renders a red "not found" card, **not** a raw error — this is the `ERR-NOT-FOUND` edge case from the eval suite.
@@ -155,7 +163,7 @@ promptfoo view
 Open `http://localhost:6006`, click the latest trace, point out spans: `pii_redaction` → `injection_check` → `load_session_memory` → `classify_intent` → `rag_retrieval` → `llm_call` → `tool_call`/`update_memory`. **Talking point**: "Every hop in the graph is independently traced, including the live NVIDIA NIM call — if a golden test regresses, we know exactly which span changed."
 
 ### Scene 9 — Roadmap close-out (30s)
-Show `docs/roadmap.md` or say: *"What you saw today — real RAG grounding, a live NVIDIA NIM Nemotron call, session memory, guardrails, and a passing automated eval suite — are all real and shipped. What's still open and tracked: Gemini/OpenAI adapters behind the same provider-agnostic client, an external search tool for questions outside our policy corpus, long-term memory across sessions rather than just within one, and broader unit-test coverage beyond PII redaction. None of that blocks what you just watched."*
+Show `docs/roadmap.md` or say: *"What you saw today — real RAG grounding, a live NVIDIA NIM Nemotron call, session AND long-term memory, guardrails, 97 passing unit tests, and a passing automated eval suite — are all real and shipped. What's still open and tracked: Gemini/OpenAI adapters behind the same provider-agnostic client, and an external search tool for questions outside our policy corpus. Neither blocks what you just watched."*
 
 ---
 
@@ -164,8 +172,8 @@ Show `docs/roadmap.md` or say: *"What you saw today — real RAG grounding, a li
 Be upfront if asked directly:
 - **`classify_intent` and tool routing are deterministic keyword rules, not an LLM call — by design, not as a shortcut.** Constitution Principle IV requires guardrails/routing to run before any model touches the request; only `generate_grounded_answer` (and only after retrieval + guardrails have already run) calls NVIDIA NIM/Nemotron.
 - **No external Google/Wikipedia search tool yet** (spec'd as US-015, not built).
-- **Session memory (US-008) is real and server-side**, but it's per-session only and non-durable (in-process dict, cleared on backend restart). **Long-term, cross-session memory (US-009) is not implemented.**
-- **Test coverage is thin.** Only `tests/test_pii_redaction.py` exists today; injection guard, tools, and graph routing are exercised through the Promptfoo suite (real, 10/10, committed), not pytest.
+- **No Gemini/OpenAI adapters yet** — NVIDIA NIM (Nemotron) is the only working provider, though `LLMClient` is written to be provider-agnostic.
+- **Long-term memory (US-009) only stores what a user explicitly asks it to remember** ("remember that ..."), never an automatic inference from conversation — and it's still a small demo feature: no fact-update/deletion flow, no size cap on how many facts accumulate per user.
 - **`docs/trace_screenshot.png` isn't committed yet** — capture it live from Phoenix if Scene 8 runs, or the night before.
 
 If asked "why not just call it done" — this is exactly the punch list in `docs/roadmap.md`.
