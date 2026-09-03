@@ -72,6 +72,22 @@ def test_redact_pii_node_redacts_email() -> None:
     assert "jane@example.com" not in result["sanitized_message"]
 
 
+# --- redaction-token stripping for search queries --------------------------------------------------------
+
+
+def test_strip_redaction_tokens_for_search() -> None:
+    text = "My email is [EMAIL_REDACTED] and my phone is [PHONE_REDACTED], can you help with VPN?"
+    stripped = graph_module._strip_redaction_tokens_for_search(text)
+    assert "[EMAIL_REDACTED]" not in stripped
+    assert "[PHONE_REDACTED]" not in stripped
+    assert "VPN" in stripped
+
+
+def test_strip_redaction_tokens_leaves_normal_text_untouched() -> None:
+    text = "What does company VPN policy require for remote access?"
+    assert graph_module._strip_redaction_tokens_for_search(text) == text
+
+
 # --- routing predicates --------------------------------------------------------
 
 

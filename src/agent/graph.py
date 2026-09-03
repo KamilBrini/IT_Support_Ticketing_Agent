@@ -115,6 +115,27 @@ def detect_injection(state: AgentState) -> AgentState:
         return {}
 
 
+_REDACTION_TOKEN_RE = re.compile(r"\[[A-Z_]+_REDACTED\]")
+
+
+def _strip_redaction_tokens_for_search(text: str) -> str:
+    """Drop PII placeholder tokens before they reach an embedding query.
+
+    "[EMAIL_REDACTED]"/"[PHONE_REDACTED]" carry no semantic meaning, but
+    they're real tokens that get embedded like any other word - on a short
+    message they can measurably dilute similarity to the actual topic
+    (observed live: "can you help with VPN?" alone scored 0.88 distance
+    against the VPN policy chunk; the same question wrapped around two
+    redaction tokens scored 1.22, just over MAX_RELEVANT_DISTANCE, wrongly
+    escalating a perfectly answerable question). Only used to build search
+    queries (RAG and long-term-memory recall) - the real sanitized_message
+    (tokens included) is still what goes into the LLM prompt, the API
+    response, and memory storage, since the tokens matter there as a
+    visible record that redaction happened.
+    """
+    return _REDACTION_TOKEN_RE.sub("", text).strip()
+
+
 def load_session_memory(state: AgentState) -> AgentState:
     """Attach short-term session history (US-008) and long-term user facts (US-009).
 
@@ -131,7 +152,7 @@ def load_session_memory(state: AgentState) -> AgentState:
         span.set_attribute("output.pair_count", len(history))
 
     user_id = state.get("user_id", "")
-    message = state.get("sanitized_message", "")
+    message = _strip_redaction_tokens_for_search(state.get("sanitized_message", ""))
     with traced_span("load_long_term_memory", {"input.user_id": user_id}) as lt_span:
         try:
             facts = long_term_memory.recall_facts(user_id, message)
@@ -172,7 +193,7 @@ def classify_intent(state: AgentState) -> AgentState:
 
 def retrieve_from_rag(state: AgentState) -> AgentState:
     """Fetch top policy chunks for grounded answering."""
-    query = state.get("sanitized_message", "")
+    query = _strip_redaction_tokens_for_search(state.get("sanitized_message", ""))
     with traced_span(
         "rag_retrieval",
         {

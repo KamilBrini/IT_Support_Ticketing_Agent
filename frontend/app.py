@@ -120,6 +120,8 @@ def render_tool_result(tool_result: Any) -> None:
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        if msg.get("redacted_preview"):
+            st.caption(f"🔒 PII redacted before processing: {msg['redacted_preview']}")
         if msg.get("tool_result"):
             render_tool_result(msg.get("tool_result"))
 
@@ -131,7 +133,8 @@ if submitted:
     if not user_text.strip():
         st.error("Please enter a message before submitting.")
     else:
-        st.session_state.messages.append({"role": "user", "content": user_text})
+        user_message: dict[str, Any] = {"role": "user", "content": user_text}
+        st.session_state.messages.append(user_message)
 
         payload = {
             "user_id": st.session_state.user_id,
@@ -173,6 +176,10 @@ if submitted:
         assistant_text = data.get("response", "No response returned.")
         intent = str(data.get("intent", "")).lower()
         tool_result = data.get("tool_result")
+        sanitized_message = data.get("sanitized_message")
+
+        if sanitized_message and sanitized_message != user_text:
+            user_message["redacted_preview"] = sanitized_message
 
         assistant_message: dict[str, Any] = {
             "role": "assistant",
