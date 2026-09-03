@@ -16,9 +16,6 @@ dist/
 # Local data (regenerable from data/policies/*.md via `python -m src.rag.ingest`)
 data/chroma/
 
-# Eval / trace outputs that may contain local run artifacts
-eval/results.json
-
 # OS
 .DS_Store
 Thumbs.db

@@ -1,0 +1,27 @@
+flowchart TD
+    UI["Streamlit UI\nfrontend/app.py\nchat + tool cards"]
+    API["FastAPI Gateway\nsrc/api/main.py\n/chat /health /tickets/{id}"]
+    Redact["PII Redaction\nsrc/security/pii_redaction.py"]
+    Guard["Injection Guard\nsrc/security/injection_guard.py"]
+    Mem["Session Memory\nsrc/agent/memory.py\n6-turn sliding window per session_id"]
+    Graph["LangGraph Orchestrator\nsrc/agent/graph.py"]
+    RAG["RAG Retriever\nsrc/rag/retrieve.py\nrelevance-distance cutoff"]
+    KB[("ChromaDB\ndata/policies, local offline\nembeddings by default")]
+    Tools["FastMCP Tools\nsrc/tools/mcp_server.py\nticket status/create, password reset"]
+    LLM["LLM Client\nsrc/llm/client.py\nNVIDIA NIM (Nemotron) live;\nGemini/OpenAI adapters planned"]
+    Search[["search_external_knowledge (planned)\nGoogle / Wikipedia\nonly when RAG has no context"]]
+    Trace["Arize Phoenix Tracing\nsrc/observability/tracing.py\nbatched export, fails safe"]
+    Eval["Promptfoo Suite\neval/promptfooconfig.yaml\n10 tests: 4 golden + 3 adversarial + 3 edge"]
+
+    UI -->|"REST POST /chat"| API
+    API --> Redact --> Guard --> Mem --> Graph
+    Graph -->|"policy_question"| RAG --> KB
+    Graph -->|"action_request"| Tools
+    Graph -->|"grounded-answer generation"| LLM
+    RAG -.->|"planned: no-context fallback"| Search
+    Graph --> Trace
+    Eval -.->|"drives"| API
+    Graph -->|"JSON response"| API -->|"tool cards + text"| UI
+
+    classDef planned stroke-dasharray: 5 5,fill:#fff4e0,stroke:#b8791e,color:#6b4a10;
+    class Search planned;

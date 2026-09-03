@@ -1,6 +1,6 @@
 # Demo Script — IT Support Ticketing System
 
-**Prepared**: 2026-09-02, updated 2026-09-03 | **Target demo date**: Friday 2026-09-04 | **Scope**: real RAG + real NVIDIA NIM (Nemotron) generation for policy answers; routing/guardrails remain deterministic by design (see Principle IV note below). Session/long-term memory (US-008/US-009) is still not implemented — see "What NOT to claim."
+**Prepared**: 2026-09-02, updated 2026-09-04 | **Target demo date**: Friday 2026-09-04 | **Scope**: real RAG + real NVIDIA NIM (Nemotron) generation for policy answers; routing/guardrails remain deterministic by design (see Principle IV note below). Session memory (US-008) is now live — see Scene 2a. Long-term cross-session memory (US-009) is still not implemented — see "What NOT to claim."
 
 This walks the same scenarios covered by `eval/promptfooconfig.yaml`, so nothing in this script is untested — every step below was run and verified on 2026-09-02. Run the **T-30 setup** the morning of the demo (not the night before) so the ONNX model cache and Chroma index are warm on the actual demo machine.
 
@@ -13,6 +13,8 @@ This walks the same scenarios covered by `eval/promptfooconfig.yaml`, so nothing
 > 6. **Tool results were dumped as a raw Python dict into the chat text** (e.g. `Tool action result: {'status': <TicketStatus.open: 'open'>, ...}`), and the malformed dict string couldn't be parsed back into a card, so no colored card ever rendered. Tool results now flow through as real structured data and get a clean one-sentence summary.
 > 7. **RAG had no relevance cutoff**, so an out-of-scope question (e.g. "policy for lunar mining on Mars") would still return the *closest* policy chunk and confidently answer from it instead of escalating. Retrieval now drops chunks that aren't actually relevant.
 > 8. `.env` was never loaded by the running app (no `load_dotenv()` call anywhere), so values set there had no effect. Now loaded at backend startup; `GET /health` reports `nvidia_nim_key_configured: true/false` (boolean only, never the value) so you can confirm your key was picked up without exposing it anywhere.
+> 9. **Session memory (US-008) shipped 2026-09-04**: a `load_session_memory` graph node now feeds the last 3 turns into the LLM prompt as conversation context, so follow-up questions stay coherent within a session. Not durable — an in-process dict, cleared on backend restart.
+> 10. **Two Promptfoo assertions were false negatives**, found while producing `eval/results.json`: the 3 injection tests were grading the *entire* JSON response body (which echoes the original message elsewhere) instead of just the `response` field, so a phrase like "hidden admin credentials" in the echoed input tripped a `not-contains` check even though the model never said it — fixed via `transformResponse` scoping the grade to `response` only. The unknown-ticket edge case checked for the literal string "not found" but the real (correct) wording is "could not find" — fixed the assertion to match. Suite is now a real, live-verified 10/10.
 
 ---
 
@@ -110,6 +112,13 @@ Type each into the Streamlit chat box:
 **Expected**: each reply starts with *"Based on policy documents, here is the grounded guidance:"* followed by a naturally-written answer (this part is now generated live by NVIDIA NIM/Nemotron, not a template) that only ever uses facts from `data/policies/*.md`. **Talking point**: "Retrieval and grounding are deterministic — ChromaDB finds the right policy chunks — and the LLM's only job is to phrase that retrieved text into a readable answer. It cannot use outside knowledge, and if the model call fails for any reason, the system falls back to the same retrieved text formatted directly, so a demo never breaks on an API hiccup (NFR-004: fail safe)."
 **If a response ever reads oddly short/generic**: that's the automatic fallback catching a bad model response — not a bug, it's the safety net working. Mention it if it happens, don't panic.
 
+### Scene 2a — Session memory (US-008)
+1. `What does company VPN policy require for remote access and MFA?` (same as Scene 2 prompt 1)
+2. Follow up in the **same session**: `Does that also apply to contractors?`
+
+**Expected**: the second answer stays on-topic (VPN/access policy) and, if the retrieved policy text doesn't specifically mention contractors, honestly says so rather than fabricating a rule — it does not restart the conversation from zero. **Talking point**: "The last 6 turns of this session are held in `src/agent/memory.py` and fed into the model as context, but the retrieved policy text is still the only source of *facts* — memory affects phrasing and continuity, never grounding."
+**Known limitation, mention only if asked**: routing to RAG in the first place still depends on keyword matching (Constitution Principle IV), so a follow-up with zero policy keywords could theoretically miss the RAG branch — memory helps *within* an already-routed conversation, it doesn't change routing itself.
+
 ### Scene 3 — Tool actions (FastMCP)
 1. `Check ticket status for TCK-1001` → renders a blue "Ticket Status" info card (open, network-ops queue).
 2. `Check ticket status for TCK-9999` → renders a red "not found" card, **not** a raw error — this is the `ERR-NOT-FOUND` edge case from the eval suite.
@@ -134,19 +143,19 @@ Invoke-RestMethod -Uri http://localhost:8000/chat -Method Post -ContentType "app
 
 **Expected**: response includes *"escalating"* wording, **not** a fabricated policy answer. **Talking point**: "No matching context → refuse and escalate, never guess (NFR-004, Principle I)."
 
-### Scene 7 — Run the Promptfoo suite live (if time allows)
+### Scene 7 — Promptfoo suite (already run — show the committed results, or re-run live if time allows)
+`eval/results.json` is already committed with a real, live 10/10 pass (verified 2026-09-04, against the actual running NVIDIA NIM backend, not mocked). To re-run live:
 ```powershell
-npm install -g promptfoo   # once, if not already installed
-promptfoo eval -c eval/promptfooconfig.yaml
+promptfoo eval -c eval/promptfooconfig.yaml -o eval/results.json
 promptfoo view
 ```
-Expected: 10/10 tests pass (4 golden + 3 adversarial + 3 edge). Screenshot the summary for `eval/results.json` / `docs/trace_screenshot.png` afterward.
+**Talking point**: "These are the exact same 10 scenarios you just watched me run by hand in Scenes 2, 3, 5, and 6 — golden policy Q&A, injection attempts, and edge cases — now automated so a regression gets caught before it ever reaches a demo."
 
 ### Scene 8 — Phoenix trace walkthrough (if Phoenix is running)
-Open `http://localhost:6006`, click the latest trace, point out spans: `pii_redaction` → `injection_check` → `intent_classification` → `rag_retrieval` → `tool_call`/`final_response_generation`. **Talking point**: "Every hop in the graph is independently traced — if a golden test regresses, we know exactly which span changed."
+Open `http://localhost:6006`, click the latest trace, point out spans: `pii_redaction` → `injection_check` → `load_session_memory` → `classify_intent` → `rag_retrieval` → `llm_call` → `tool_call`/`update_memory`. **Talking point**: "Every hop in the graph is independently traced, including the live NVIDIA NIM call — if a golden test regresses, we know exactly which span changed."
 
 ### Scene 9 — Roadmap close-out (30s)
-Show `docs/roadmap.md` or say: *"The rule-based classifier and templated answers you saw are intentional for this milestone — the next checkpoint swaps them for a real NVIDIA NIM / Gemini / OpenAI call behind a provider-agnostic client, already spec'd in Constitution v2.0.0 Principle IX and tasks.md Phase 17."*
+Show `docs/roadmap.md` or say: *"What you saw today — real RAG grounding, a live NVIDIA NIM Nemotron call, session memory, guardrails, and a passing automated eval suite — are all real and shipped. What's still open and tracked: Gemini/OpenAI adapters behind the same provider-agnostic client, an external search tool for questions outside our policy corpus, long-term memory across sessions rather than just within one, and broader unit-test coverage beyond PII redaction. None of that blocks what you just watched."*
 
 ---
 
@@ -155,9 +164,9 @@ Show `docs/roadmap.md` or say: *"The rule-based classifier and templated answers
 Be upfront if asked directly:
 - **`classify_intent` and tool routing are deterministic keyword rules, not an LLM call — by design, not as a shortcut.** Constitution Principle IV requires guardrails/routing to run before any model touches the request; only `generate_grounded_answer` (and only after retrieval + guardrails have already run) calls NVIDIA NIM/Nemotron.
 - **No external Google/Wikipedia search tool yet** (spec'd as US-015, not built).
-- **No server-side multi-turn memory yet.** Streamlit keeps chat history for display only; the backend does not use prior turns for context (US-008/US-009 not implemented).
-- **Test coverage is thin.** Only `tests/test_pii_redaction.py` exists today; injection guard, tools, and graph routing are exercised only through the Promptfoo suite, not pytest.
-- **`eval/results.json` and trace screenshots aren't committed yet** — capture them live or the night before.
+- **Session memory (US-008) is real and server-side**, but it's per-session only and non-durable (in-process dict, cleared on backend restart). **Long-term, cross-session memory (US-009) is not implemented.**
+- **Test coverage is thin.** Only `tests/test_pii_redaction.py` exists today; injection guard, tools, and graph routing are exercised through the Promptfoo suite (real, 10/10, committed), not pytest.
+- **`docs/trace_screenshot.png` isn't committed yet** — capture it live from Phoenix if Scene 8 runs, or the night before.
 
 If asked "why not just call it done" — this is exactly the punch list in `docs/roadmap.md`.
 

@@ -1,24 +1,27 @@
 # Build Roadmap
 
-Status snapshot: 2026-09-02. Each checkpoint lists a **prompt to give Claude**, what it should produce, and **how to verify it yourself** before moving on. Checkpoints map to `tasks.md` Phase 17 and the still-open user stories (US-008, US-009, US-014, US-015) in `specs/001-it-support-ticketing-system/spec.md`.
+Status snapshot: 2026-09-04 (demo day). Each checkpoint lists a **prompt to give Claude**, what it should produce, and **how to verify it yourself** before moving on. Checkpoints map to `tasks.md` Phase 17 and the still-open user stories (US-009, US-014, US-015) in `specs/001-it-support-ticketing-system/spec.md`.
 
 ## Where things stand right now
 
-**Real and verified (2026-09-03):**
+**Real and verified (2026-09-04):**
 - FastAPI backend (`/chat`, `/health`, `/tickets/{id}`), Streamlit frontend, both run and talk to each other over REST.
-- LangGraph 10-node workflow: PII redaction → injection guard → intent classification → RAG / tool / direct / blocked / escalate → response. **Routing/classification/guardrails are deterministic keyword rules by design** (Principle IV); **`generate_grounded_answer` now calls NVIDIA NIM (Nemotron)** for real, with an automatic fallback to the deterministic template on any API failure or degenerate output.
+- LangGraph 10-node workflow: PII redaction → injection guard → session memory → intent classification → RAG / tool / direct / blocked / escalate → response. **Routing/classification/guardrails are deterministic keyword rules by design** (Principle IV); **`generate_grounded_answer` calls NVIDIA NIM (Nemotron)** for real, with an automatic fallback to the deterministic template on any API failure or degenerate output.
 - RAG: ChromaDB retrieval over `data/policies/*.md`, local offline embedding model (no API key needed), plus a relevance-distance cutoff so off-topic questions correctly escalate instead of grounding in the nearest-but-wrong chunk.
 - FastMCP tools: `get_ticket_status` (real ticket-ID extraction from the message), `request_password_reset`, `create_ticket` — in-memory seeded data, real Pydantic validation, results flow through as structured data (not stringified) with a clean human-readable summary.
 - PII redaction + prompt injection guard: regex/keyword-based, real and tested (`tests/test_pii_redaction.py`).
-- Promptfoo suite: 10 tests defined (4 golden, 3 adversarial, 3 edge) — not yet run-and-committed (`eval/results.json` doesn't exist).
-- Phoenix tracing: wired into every node including a new `llm_call` span (provider, model, status), fails safe when no collector is running, batched (non-blocking) export.
+- Session memory (US-008): `src/agent/memory.py`, 6-turn sliding window per session, feeds the last 3 turns into the LLM prompt. Non-durable (in-process dict).
+- Promptfoo suite: 10/10 passing, real live run against the running backend, committed to `eval/results.json` (two false-negative assertions found and fixed along the way — see `docs/demo_script.md` bug log #10).
+- Phoenix tracing: wired into every node including a `llm_call` span (provider, model, status), fails safe when no collector is running, batched (non-blocking) export.
+- Git: repo initialized, work committed (was previously **zero** git history — a real gap now closed).
+- `docs/SDD.md`, `docs/architecture.png`, `docs/langgraph_state.png`: written/generated and committed.
 
 **Spec'd but not built:**
 - Gemini/OpenAI adapters behind the same `LLMClient` interface (Checkpoint 2 below) — NVIDIA NIM only for now.
 - `search_external_knowledge` FastMCP tool (US-015).
-- Long-term per-user memory across sessions (US-009) — not built. (Short-term session memory / sliding window, US-008, is now done — see Checkpoint 4 below.)
+- Long-term per-user memory across sessions (US-009) — not built. (Short-term session memory, US-008, is done — see Checkpoint 4a.)
 - Test coverage beyond PII redaction: injection guard, tools, graph routing, RAG retrieval, schemas, LLM client (`NFR-008`).
-- `docs/SDD.md`, `docs/architecture.png`, `docs/langgraph_state.png`, `docs/trace_screenshot.png`, `eval/results.json` — none exist yet (checklist §23.2).
+- `docs/trace_screenshot.png` — not captured yet (needs a live Phoenix run to screenshot).
 
 ---
 
@@ -83,22 +86,22 @@ Verified: trim logic unit-tested (9 turns in → exactly the last 6 kept, oldest
 
 ---
 
-## Checkpoint 6 — Evaluation and observability evidence
+## ✅ Checkpoint 6 — Mostly DONE (2026-09-04): Evaluation and observability evidence
 
-**Prompt**: *"Run the Promptfoo suite and save results to `eval/results.json`. Start Phoenix, run a full demo pass, and tell me which trace to screenshot for `docs/trace_screenshot.png`."*
+Promptfoo suite ran live against the real backend: 10/10 passing, saved to `eval/results.json` (committed — the file is no longer in `.gitignore`). Two test-config false negatives were found and fixed in the process (see `docs/demo_script.md` bug log #10) — not product bugs, just assertions that were checking the wrong field or an exact wrong phrase.
 
-**Verify**: `eval/results.json` shows 10/10 (or documents any real failures + fixes, per Edge Case rule "Promptfoo policy accuracy test fails → fix and re-run before submission"). Screenshot captured.
+**Still open**: `docs/trace_screenshot.png` — needs a live Phoenix run (`python -m phoenix.server.main serve`) plus a manual screenshot of one full trace. Do this once during T-30 setup or right after the demo.
 
 ---
 
-## Checkpoint 7 — Submission packaging
+## ✅ Checkpoint 7 — Mostly DONE (2026-09-04): Submission packaging
 
-**Prompt**: *"Walk me through Section 23.2's Submission Checklist item by item and tell me what's still missing."*
+`docs/SDD.md` written (real system as built, includes an explicit "Known Deviations" table against the original spec/contracts docs — notably that `specs/.../data-model.md` and `contracts/rag-and-tools.md` describe an aspirational multi-tenant design that was never implemented; the shipped system is single-tenant). `docs/architecture.png` and `docs/langgraph_state.png` generated via `mermaid-cli` from `docs/_figure1_architecture.mmd` / `docs/_figure2_langgraph.mmd` and committed.
 
-**Verify**: every path in the checklist (`docs/SDD.md`, `docs/architecture.png`, `docs/langgraph_state.png`, `/src`, `/frontend/src` or `/frontend`, `eval/promptfooconfig.yaml`, `eval/results.json`, `docs/trace_screenshot.png`, README Copilot Reflection, `docs/demo_script.md`) exists and is current.
+**Still open**: `docs/trace_screenshot.png` (see Checkpoint 6); README's Copilot Reflection section hasn't been refreshed to mention today's LLM/memory/git/eval work; `/frontend/src` in the original checklist literally doesn't exist as a path (the app is a single `frontend/app.py` file — a documented deviation, see `docs/SDD.md` §8, not a missing file).
 
 ---
 
 ## Suggested order given the Friday deadline
 
-Friday's demo does **not** require Checkpoints 1–4 — it runs on the current stable build (see `docs/demo_script.md`). After Friday, do them in order 1 → 2 → 3 → 4 → 5 → 6 → 7; each one is independently testable and safe to stop after, so partial progress is never a broken state.
+Checkpoints 1 (LLM) and 4a (session memory) are done and demo-ready — see `docs/demo_script.md` Scenes 2 and 2a. Git, Promptfoo, and the doc/PNG exports (Checkpoints 6-7) are also done. What's left, in order of value if there's time before or after the demo: 5 (test coverage — protects against silent regressions) → 6's remaining item (trace screenshot — five minutes, do it once Phoenix is running anyway) → 2 (Gemini/OpenAI adapters) → 3 (external search tool) → 4b (long-term memory). None of the remaining items block presenting what's already built.

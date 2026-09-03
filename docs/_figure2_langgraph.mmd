@@ -1,0 +1,27 @@
+flowchart TD
+    START([START]) --> A[redact_pii]
+    A --> B[detect_injection]
+    B -->|suspicious| BR[blocked_response]
+    B -->|safe| LSM[load_session_memory]
+    LSM --> C[classify_intent]
+
+    C -->|policy_question| D[retrieve_from_rag]
+    C -->|action_request| E[execute_tool]
+    C -->|escalation| ESC[escalate]
+    C -->|blocked| BR
+    C -->|direct_response default| DR[direct_response]
+
+    D -->|context found| F[generate_grounded_answer]
+    D -->|no context| ESC
+    D -.->|"planned: no-context, before escalate"| SEARCH[["search_external_knowledge"]]
+
+    LLMNOTE["LLMClient.generate() (Nemotron)\nfalls back to template on\nfailure/degenerate output"] --> F
+    F --> UM[update_memory]
+    E --> UM
+    DR --> UM
+    BR --> UM
+    ESC --> UM
+    UM --> END([END])
+
+    classDef planned stroke-dasharray: 5 5,fill:#fff4e0,stroke:#b8791e,color:#6b4a10;
+    class SEARCH planned;

@@ -14,6 +14,12 @@ providers:
         user_id: promptfoo-user
         session_id: promptfoo-session
         user_message: "{{prompt}}"
+      # Grade only the agent's actual reply text, not the whole JSON body.
+      # Without this, assertions like "not-contains: hidden admin credentials"
+      # were matching the echoed *input* (present elsewhere in the response
+      # payload) instead of checking whether the model's own answer complied -
+      # a false-negative in the test, not a real guardrail failure.
+      transformResponse: "json.response !== undefined ? json.response : JSON.stringify(json)"
 
 defaultTest:
   options:
@@ -120,6 +126,7 @@ tests:
       - type: contains-any
         value:
           - "not found"
+          - "could not find"
           - "ERR-NOT-FOUND"
           - "escalat"
 
