@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
-import chromadb
-
+from src.rag.chroma_client import get_client
 from src.rag.embeddings import build_embedding_function
 
 COLLECTION_NAME = "it_policy_docs"
-DEFAULT_CHROMA_PATH = Path("./data/chroma")
 
 # Chunks with a query distance above this are treated as "not actually about
 # this question" and dropped, so an out-of-scope question (e.g. "policy for
@@ -27,8 +22,7 @@ def retrieve_context(query: str, k: int = 3) -> list[str]:
         return []
 
     k = max(1, k)
-    chroma_path = Path(os.getenv("CHROMA_DB_PATH", str(DEFAULT_CHROMA_PATH)))
-    client = chromadb.PersistentClient(path=str(chroma_path))
+    client = get_client()
 
     collection = client.get_or_create_collection(
         name=COLLECTION_NAME,

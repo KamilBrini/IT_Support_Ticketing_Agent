@@ -384,6 +384,25 @@ def execute_tool(state: AgentState) -> AgentState:
         }
 
 
+_REMEMBER_TRIGGER_RE = re.compile(
+    r"^(please\s+)?remember\s+(that|my)?\s*", re.IGNORECASE
+)
+
+
+def _extract_fact_text(message: str) -> str:
+    """Strip the trigger phrase itself before storing, keeping just the fact.
+
+    "Remember that I work from the London office" stored verbatim embeds
+    the noise words "Remember that" right alongside the actual fact,
+    measurably hurting later similarity search (observed live: this alone
+    was enough to push a genuinely relevant recall query from ~1.5 to 1.78
+    distance, past the relevance cutoff). Falls back to the full message if
+    stripping would leave nothing.
+    """
+    stripped = _REMEMBER_TRIGGER_RE.sub("", message).strip()
+    return stripped or message.strip()
+
+
 def remember_fact(state: AgentState) -> AgentState:
     """Store a user-stated fact in per-user long-term memory (US-009).
 
@@ -392,7 +411,7 @@ def remember_fact(state: AgentState) -> AgentState:
     always has to say so explicitly (Constitution Principle IV).
     """
     user_id = state.get("user_id", "")
-    fact = state.get("sanitized_message", "")
+    fact = _extract_fact_text(state.get("sanitized_message", ""))
     with traced_span(
         "remember_fact",
         {"input.user_id": user_id, "input.fact_preview": safe_preview(fact)},

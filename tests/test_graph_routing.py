@@ -298,8 +298,23 @@ def test_remember_fact_node_stores_and_confirms(monkeypatch: pytest.MonkeyPatch)
     )
     state = {"user_id": "u-1", "sanitized_message": "Remember that I work from the London office."}
     result = graph_module.remember_fact(state)
-    assert calls == [("u-1", "Remember that I work from the London office.")]
+    # The trigger phrase itself is stripped before storage - only the fact
+    # content is embedded, so it doesn't dilute later similarity search.
+    assert calls == [("u-1", "I work from the London office.")]
     assert "remember" in result["response"].lower()
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        ("Remember that I work from the London office.", "I work from the London office."),
+        ("Remember my laptop is a MacBook Pro.", "laptop is a MacBook Pro."),
+        ("Please remember I use a MacBook Pro.", "I use a MacBook Pro."),
+        ("Remember I'm in the London office.", "I'm in the London office."),
+    ],
+)
+def test_extract_fact_text_strips_trigger_phrase(message: str, expected: str) -> None:
+    assert graph_module._extract_fact_text(message) == expected
 
 
 def test_remember_fact_node_fails_safe_on_storage_error(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -7,14 +7,12 @@ touches real demo data and cleans up after itself.
 
 from __future__ import annotations
 
-import os
 import uuid
-from pathlib import Path
 
-import chromadb
 import pytest
 
 from src.agent import long_term_memory
+from src.rag.chroma_client import get_client
 
 
 @pytest.fixture
@@ -22,10 +20,8 @@ def user_id():
     """A fresh, isolated user_id per test; its collection is deleted after."""
     uid = f"test-user-{uuid.uuid4().hex[:8]}"
     yield uid
-    chroma_path = Path(os.getenv("CHROMA_DB_PATH", str(long_term_memory.DEFAULT_CHROMA_PATH)))
-    client = chromadb.PersistentClient(path=str(chroma_path))
     try:
-        client.delete_collection(long_term_memory._collection_name(uid))
+        get_client().delete_collection(long_term_memory._collection_name(uid))
     except Exception:
         pass  # never stored anything, nothing to clean up
 
@@ -53,8 +49,7 @@ def test_recall_ignores_blank_query(user_id: str) -> None:
 def test_facts_are_isolated_per_user() -> None:
     user_a = f"test-user-a-{uuid.uuid4().hex[:8]}"
     user_b = f"test-user-b-{uuid.uuid4().hex[:8]}"
-    chroma_path = Path(os.getenv("CHROMA_DB_PATH", str(long_term_memory.DEFAULT_CHROMA_PATH)))
-    client = chromadb.PersistentClient(path=str(chroma_path))
+    client = get_client()
 
     try:
         long_term_memory.remember_fact(user_a, "I work from the London office on a MacBook Pro.")

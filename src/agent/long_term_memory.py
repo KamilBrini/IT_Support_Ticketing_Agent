@@ -17,15 +17,11 @@ inference by the LLM - consistent with Constitution Principle IV.
 
 from __future__ import annotations
 
-import os
 import re
-from pathlib import Path
 
-import chromadb
-
+from src.rag.chroma_client import get_client
 from src.rag.embeddings import build_embedding_function
 
-DEFAULT_CHROMA_PATH = Path("./data/chroma")
 _COLLECTION_PREFIX = "user_memory_"
 _UNSAFE_ID_CHARS = re.compile(r"[^a-zA-Z0-9_-]")
 
@@ -48,8 +44,7 @@ def _collection_name(user_id: str) -> str:
 
 
 def _get_collection(user_id: str):
-    chroma_path = Path(os.getenv("CHROMA_DB_PATH", str(DEFAULT_CHROMA_PATH)))
-    client = chromadb.PersistentClient(path=str(chroma_path))
+    client = get_client()
     return client.get_or_create_collection(
         name=_collection_name(user_id),
         embedding_function=build_embedding_function(),
