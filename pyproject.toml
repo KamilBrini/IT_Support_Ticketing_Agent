@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "it-support-agent"
+version = "0.1.0"
+description = "IT support agent service with RAG, security controls, and observability"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "openai>=1.50.0",
+  "chromadb>=0.5.5",
+  "arize-phoenix>=4.30.0",
+  "python-dotenv>=1.0.1",
+  "pydantic>=2.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
