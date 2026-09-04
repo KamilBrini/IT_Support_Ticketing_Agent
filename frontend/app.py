@@ -143,7 +143,10 @@ if submitted:
         }
 
         try:
-            response = requests.post(CHAT_ENDPOINT, json=payload, timeout=30)
+            # 60s, not 30s: an occasional slow NVIDIA NIM response (cold
+            # start after idle time) can legitimately take 30-45s, and that
+            # shouldn't look like a broken app mid-demo.
+            response = requests.post(CHAT_ENDPOINT, json=payload, timeout=60)
         except requests.RequestException as exc:
             error_message = f"Could not reach API at {CHAT_ENDPOINT}. Details: {exc}"
             st.session_state.messages.append({

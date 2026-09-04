@@ -30,6 +30,10 @@ class _ProviderConfig:
     # documented off-switch, distinct from the older "detailed thinking off"
     # system-prompt convention used by some other Nemotron deployments.
     extra_body: dict | None = None
+    # False for providers whose endpoint doesn't check the key at all (e.g.
+    # a free/public router) — the OpenAI SDK still requires a non-empty
+    # string, so a placeholder is used instead of requiring a real secret.
+    requires_api_key: bool = True
 
 
 _PROVIDER_CONFIG: dict[str, _ProviderConfig] = {
@@ -43,6 +47,13 @@ _PROVIDER_CONFIG: dict[str, _ProviderConfig] = {
     "openai": _ProviderConfig(
         api_key_env="OPENAI_API_KEY",
         model_env="OPENAI_MODEL",
+    ),
+    "opencode_zen": _ProviderConfig(
+        api_key_env="OPENCODE_ZEN_API_KEY",
+        model_env="OPENCODE_ZEN_MODEL",
+        base_url_env="OPENCODE_ZEN_BASE_URL",
+        default_base_url="https://opencode.ai/zen/v1",
+        requires_api_key=False,
     ),
 }
 
@@ -65,7 +76,10 @@ class LLMClient:
         cfg = _PROVIDER_CONFIG[self.provider]
         api_key = os.getenv(cfg.api_key_env, "").strip()
         if not api_key:
-            raise LLMConfigError(f"{cfg.api_key_env} is not set")
+            if not cfg.requires_api_key:
+                api_key = "not-required"
+            else:
+                raise LLMConfigError(f"{cfg.api_key_env} is not set")
 
         self.model = os.getenv(cfg.model_env, "").strip()
         if not self.model:
