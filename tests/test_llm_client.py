@@ -51,3 +51,20 @@ def test_opencode_zen_still_requires_model(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.delenv("OPENCODE_ZEN_MODEL", raising=False)
     with pytest.raises(LLMConfigError, match="OPENCODE_ZEN_MODEL"):
         LLMClient()
+
+
+def test_client_has_a_bounded_timeout_shorter_than_the_frontend_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow/hung provider call must fail before the frontend's own 60s
+    request timeout gives up - otherwise the user sees a false "could not
+    connect to the backend" error while the backend is still waiting on an
+    LLM call with no bound (the SDK default is 600s), and the try/except
+    fallback in generate_grounded_answer never triggers because nothing
+    ever raises."""
+    monkeypatch.setenv("LLM_PROVIDER", "nvidia_nim")
+    monkeypatch.setenv("NVIDIA_NIM_API_KEY", "fake-key-for-test")
+    monkeypatch.setenv("NVIDIA_NIM_MODEL", "some-model")
+    client = LLMClient()
+    assert client._client.timeout == 45.0
+    assert client._client.timeout < 60
