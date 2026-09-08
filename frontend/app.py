@@ -103,13 +103,21 @@ def inject_custom_css() -> None:
         header[data-testid="stHeader"] { background: transparent; height: 2.5rem; }
         div[data-testid="stToolbar"] { visibility: hidden; }
         div[data-testid="stDecoration"] { visibility: hidden; }
+        /* The sidebar's own re-expand button also lives inside stToolbar,
+           so hiding that wholesale left no way to bring a collapsed
+           sidebar back - force just this one control visible again. */
+        div[data-testid="stToolbar"] [data-testid="stExpandSidebarButton"] {
+            visibility: visible !important;
+            color: #5FFB07 !important;
+        }
         /* Streamlit's own generic running/"Stop" indicator - replaced by the
            branded "Thinking..." pill below, which is scoped to exactly the
            backend call instead of every rerun, so keeping both would be
            redundant. */
         div[data-testid="stStatusWidget"] { visibility: hidden; }
 
-        .block-container { padding-top: 1.25rem; max-width: 1200px; }
+        /* Extra top padding clears the fixed FDM logo mark - see .fdm-logo. */
+        .block-container { padding-top: 4.5rem; max-width: 1200px; }
 
         /* --- "Thinking..." indicator (wraps the requests.post call in
            send_chat_message via st.spinner - see there for why) ---
@@ -171,16 +179,29 @@ def inject_custom_css() -> None:
             30% { opacity: 1; transform: scale(1); }
         }
 
-        /* --- FDM logo mark --- */
+        /* --- FDM logo mark: fixed to the true top-left of the page, not
+           just left-aligned within the header card, so it stays put (and
+           stays clear of Streamlit's own sidebar-expand arrow, which lives
+           at roughly x:19-47/y:16-44 when the sidebar is collapsed)
+           regardless of sidebar state or scroll position. --- */
         .fdm-logo {
+            position: fixed;
+            top: 10px;
+            left: 56px;
+            /* Streamlit's own sidebar carries z-index: 999991 in its
+               built-in stylesheet - anything less than that gets painted
+               over wherever the two overlap, which is exactly the corner
+               this logo lives in. */
+            z-index: 999999;
             background: #000000;
             border: 1px solid #2A2A2A;
             border-radius: 10px;
-            padding: 8px 14px;
+            padding: 6px 12px;
             display: flex;
             align-items: center;
             flex-shrink: 0;
         }
+        [data-testid="stSidebar"] [data-testid="stSidebarUserContent"] { padding-top: 2.5rem; }
 
         /* --- Sidebar --- */
         [data-testid="stSidebar"] {
@@ -635,18 +656,17 @@ def render_tool_result(tool_result: Any) -> None:
 
 
 _FDM_LOGO_SVG = (
-    '<svg width="108" height="38" viewBox="0 0 168 60" xmlns="http://www.w3.org/2000/svg" '
+    '<svg width="92" height="38" viewBox="0 0 140 60" xmlns="http://www.w3.org/2000/svg" '
     'role="img" aria-label="FDM">'
     '<text x="2" y="47" font-family="Arial, Helvetica, sans-serif" font-weight="900" '
-    'font-size="50" fill="#5FFB07" transform="skewX(-8)">FD</text>'
-    '<polyline points="94,55 104,24 114,42 126,16 134,30 150,1" fill="none" stroke="#5FFB07" '
-    'stroke-width="10" stroke-linecap="square" stroke-linejoin="miter" />'
+    'font-size="50" fill="#5FFB07" transform="skewX(-8)">FDM</text>'
     '</svg>'
 )
 
+st.markdown(f'<div class="fdm-logo">{_FDM_LOGO_SVG}</div>', unsafe_allow_html=True)
+
 st.markdown(
-    f'''<div class="app-header">
-        <div class="fdm-logo">{_FDM_LOGO_SVG}</div>
+    '''<div class="app-header">
         <div>
             <div class="app-header__name">IT Support Agent</div>
             <div class="app-header__subtitle">Grounded policy answers, live ticket actions, and human escalation — every step traced.</div>
