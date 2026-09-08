@@ -467,8 +467,43 @@ def remember_fact(state: AgentState) -> AgentState:
         return {"response": response_text}
 
 
+# Mirrors frontend/app.py's EMPLOYEE_ROSTER (first names only, for a warm
+# greeting). Duplicated rather than shared - the frontend and backend don't
+# share a Python module boundary - but both are small, static, and rooted
+# in the same seeded data (SupportTicket.requester_user_id in
+# src/tools/mcp_server.py). A user_id outside this map (custom/testing IDs)
+# just gets a nameless greeting instead of a guessed one.
+_KNOWN_EMPLOYEE_NAMES = {
+    "u-001": "Alice",
+    "u-002": "Priya",
+    "u-010": "Jordan",
+    "u-021": "Sam",
+}
+
+_DIRECT_RESPONSE_SYSTEM_PROMPT = (
+    "You are a friendly IT support assistant. The employee has sent a general "
+    "greeting or open-ended message rather than a specific request. Greet them "
+    "warmly by name if one is given (never invent a name if none is given), "
+    "then briefly describe what you can help with: checking ticket status, "
+    "creating a ticket, resetting a password, and answering IT policy "
+    "questions (VPN, security, hardware, licensing) grounded in real company "
+    "documents. Keep it to 2-3 short sentences, plain prose, no markdown "
+    "headings or bullet lists, no preamble. Never claim a capability not "
+    "listed here."
+)
+
+
 def direct_response(state: AgentState) -> AgentState:
-    """Provide a non-tool direct response for general requests."""
+    """Provide a warm, LLM-generated greeting/help message for general requests.
+
+    Falls back to a static template if the LLM call fails or returns
+    something degenerate (NFR-004: fail safe) - same pattern as
+    generate_grounded_answer, just with no retrieved context to ground on,
+    since this path isn't answering a policy question.
+    """
+    user_id = state.get("user_id", "")
+    name = _KNOWN_EMPLOYEE_NAMES.get(user_id)
+    message = state.get("sanitized_message", "")
     with traced_span(
         "final_response_generation",
         {
@@ -476,7 +511,37 @@ def direct_response(state: AgentState) -> AgentState:
             "input.intent": state.get("intent"),
         },
     ) as span:
-        response_text = "I can help with IT support questions, policy guidance, and ticket actions."
+        response_text = (
+            f"Hi {name}! " if name else "Hi! "
+        ) + "I can help with IT support questions, policy guidance, and ticket actions."
+        generation_mode = "template_fallback"
+
+        with traced_span("llm_call", {"input.mode": "direct_greeting"}) as llm_span:
+            try:
+                client = get_llm_client()
+                llm_span.set_attribute("output.provider", client.provider)
+                llm_span.set_attribute("output.model", client.model)
+                user_prompt = (
+                    f"The employee's first name is {name}.\n" if name else ""
+                ) + f"Employee message: {message}"
+                llm_answer = client.generate(
+                    system=_DIRECT_RESPONSE_SYSTEM_PROMPT,
+                    user=user_prompt,
+                    max_tokens=150,
+                )
+                if llm_answer and _looks_like_valid_answer(llm_answer):
+                    response_text = llm_answer
+                    generation_mode = "llm"
+                    llm_span.set_attribute("output.status", "success")
+                else:
+                    llm_span.set_attribute(
+                        "output.status", "empty_response" if not llm_answer else "rejected_degenerate_output"
+                    )
+            except Exception as exc:
+                llm_span.set_attribute("output.status", "failed")
+                llm_span.set_attribute("error.type", exc.__class__.__name__)
+
+        span.set_attribute("output.generation_mode", generation_mode)
         span.set_attribute("output.response_preview", safe_preview(response_text))
         return {
             "response": response_text,
