@@ -97,14 +97,90 @@ def inject_custom_css() -> None:
             font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
         }
 
-        /* --- Hide Streamlit chrome, keep the status/running spinner --- */
+        /* --- Hide Streamlit chrome --- */
         #MainMenu { visibility: hidden; }
         footer { visibility: hidden; }
         header[data-testid="stHeader"] { background: transparent; height: 2.5rem; }
         div[data-testid="stToolbar"] { visibility: hidden; }
         div[data-testid="stDecoration"] { visibility: hidden; }
+        /* Streamlit's own generic running/"Stop" indicator - replaced by the
+           branded "Thinking..." pill below, which is scoped to exactly the
+           backend call instead of every rerun, so keeping both would be
+           redundant. */
+        div[data-testid="stStatusWidget"] { visibility: hidden; }
 
         .block-container { padding-top: 1.25rem; max-width: 1200px; }
+
+        /* --- "Thinking..." indicator (wraps the requests.post call in
+           send_chat_message via st.spinner - see there for why) ---
+           Fixed position: st.spinner() renders wherever the current script
+           position is, which differs between a callback (top of main area)
+           and the main body - fixed positioning makes it always land in
+           the same top-right spot regardless of which triggered it. */
+        [data-testid="stSpinner"] {
+            position: fixed !important;
+            top: 16px;
+            right: 28px;
+            z-index: 9999;
+            width: auto !important;
+            background: #161616;
+            border: 1px solid #2A2A2A;
+            border-radius: 999px;
+            padding: 7px 16px 7px 14px;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+        }
+        [data-testid="stSpinner"] > div {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        [data-testid="stSpinner"] [data-testid="stMarkdownContainer"] p {
+            color: #D4D4D4;
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 0.01em;
+            margin: 0;
+        }
+        /* Three-dot pulse built from one element + its two pseudo-elements,
+           replacing Streamlit's default spinner glyph entirely. */
+        [data-testid="stSpinnerIcon"] {
+            width: 6px; height: 6px;
+            margin: 0 8px;
+            border: none !important;
+            border-radius: 50%;
+            background: #5FFB07;
+            display: inline-block;
+            position: relative;
+            animation: thinkPulse 1.1s ease-in-out infinite;
+            animation-delay: 0.18s;
+        }
+        [data-testid="stSpinnerIcon"]::before,
+        [data-testid="stSpinnerIcon"]::after {
+            content: "";
+            position: absolute;
+            top: 0;
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: #5FFB07;
+            animation: thinkPulse 1.1s ease-in-out infinite;
+        }
+        [data-testid="stSpinnerIcon"]::before { left: -14px; animation-delay: 0s; }
+        [data-testid="stSpinnerIcon"]::after { left: 14px; animation-delay: 0.36s; }
+        @keyframes thinkPulse {
+            0%, 60%, 100% { opacity: 0.35; transform: scale(0.7); }
+            30% { opacity: 1; transform: scale(1); }
+        }
+
+        /* --- FDM logo mark --- */
+        .fdm-logo {
+            background: #000000;
+            border: 1px solid #2A2A2A;
+            border-radius: 10px;
+            padding: 8px 14px;
+            display: flex;
+            align-items: center;
+            flex-shrink: 0;
+        }
 
         /* --- Sidebar --- */
         [data-testid="stSidebar"] {
@@ -157,14 +233,6 @@ def inject_custom_css() -> None:
             padding: 18px 24px;
             margin-bottom: 18px;
             box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
-        }
-        .app-header__icon {
-            font-size: 26px;
-            width: 46px; height: 46px;
-            display: flex; align-items: center; justify-content: center;
-            background: rgba(95, 251, 7, 0.12);
-            border-radius: 12px;
-            flex-shrink: 0;
         }
         .app-header__name { font-size: 1.3rem; font-weight: 800; color: #FFFFFF; line-height: 1.2; }
         .app-header__subtitle { font-size: 0.85rem; color: #A0A0A0; margin-top: 2px; }
@@ -275,8 +343,13 @@ def send_chat_message(user_text: str) -> None:
     try:
         # 60s, not 30s: an occasional slow NVIDIA NIM response (cold start
         # after idle time) can legitimately take 30-45s, and that shouldn't
-        # look like a broken app mid-demo.
-        response = requests.post(CHAT_ENDPOINT, json=payload, timeout=60)
+        # look like a broken app mid-demo. st.spinner wraps the blocking
+        # call so the "thinking" indicator (styled via CSS - see
+        # inject_custom_css) is up for exactly as long as the backend is
+        # actually working, from every trigger (chat box, ticket chips,
+        # reset button, demo scenarios) since they all funnel through here.
+        with st.spinner("Thinking..."):
+            response = requests.post(CHAT_ENDPOINT, json=payload, timeout=60)
     except requests.RequestException as exc:
         st.session_state.messages.append({
             "role": "assistant",
@@ -561,9 +634,19 @@ def render_tool_result(tool_result: Any) -> None:
         )
 
 
+_FDM_LOGO_SVG = (
+    '<svg width="108" height="38" viewBox="0 0 168 60" xmlns="http://www.w3.org/2000/svg" '
+    'role="img" aria-label="FDM">'
+    '<text x="2" y="47" font-family="Arial, Helvetica, sans-serif" font-weight="900" '
+    'font-size="50" fill="#5FFB07" transform="skewX(-8)">FD</text>'
+    '<polyline points="94,55 104,24 114,42 126,16 134,30 150,1" fill="none" stroke="#5FFB07" '
+    'stroke-width="10" stroke-linecap="square" stroke-linejoin="miter" />'
+    '</svg>'
+)
+
 st.markdown(
-    '''<div class="app-header">
-        <div class="app-header__icon">🛠️</div>
+    f'''<div class="app-header">
+        <div class="fdm-logo">{_FDM_LOGO_SVG}</div>
         <div>
             <div class="app-header__name">IT Support Agent</div>
             <div class="app-header__subtitle">Grounded policy answers, live ticket actions, and human escalation — every step traced.</div>
