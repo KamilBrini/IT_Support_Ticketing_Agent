@@ -129,9 +129,56 @@ def test_route_after_retrieval_without_context() -> None:
 # --- terminal response nodes --------------------------------------------------------
 
 
-def test_direct_response_text() -> None:
-    result = graph_module.direct_response({"intent": "direct_response"})
+def test_direct_response_falls_back_when_llm_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise() -> None:
+        raise RuntimeError("no API key configured")
+
+    monkeypatch.setattr(graph_module, "get_llm_client", _raise)
+    result = graph_module.direct_response({"intent": "direct_response", "sanitized_message": "hi"})
     assert "IT support" in result["response"]
+
+
+def test_direct_response_fallback_greets_known_employee_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise() -> None:
+        raise RuntimeError("no API key configured")
+
+    monkeypatch.setattr(graph_module, "get_llm_client", _raise)
+    result = graph_module.direct_response(
+        {"intent": "direct_response", "sanitized_message": "hi", "user_id": "u-001"}
+    )
+    assert result["response"].startswith("Hi Alice!")
+
+
+def test_direct_response_uses_llm_output_when_valid(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeClient:
+        provider = "fake"
+        model = "fake-model"
+
+        def generate(self, *, system: str, user: str, **_: object) -> str:
+            assert "Alice" in user
+            return "Hi Alice! I can check ticket status, reset passwords, and answer policy questions."
+
+    monkeypatch.setattr(graph_module, "get_llm_client", lambda: _FakeClient())
+    result = graph_module.direct_response(
+        {"intent": "direct_response", "sanitized_message": "hi", "user_id": "u-001"}
+    )
+    assert result["response"] == "Hi Alice! I can check ticket status, reset passwords, and answer policy questions."
+
+
+def test_direct_response_no_name_for_unknown_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeClient:
+        provider = "fake"
+        model = "fake-model"
+
+        def generate(self, *, system: str, user: str, **_: object) -> str:
+            assert "first name" not in user
+            return "Hi there! I can check ticket status, reset passwords, and answer policy questions."
+
+    monkeypatch.setattr(graph_module, "get_llm_client", lambda: _FakeClient())
+    result = graph_module.direct_response(
+        {"intent": "direct_response", "sanitized_message": "hi", "user_id": "custom-test-id"}
+    )
+    assert "Hi there" in result["response"]
 
 
 def test_blocked_response_sets_intent_and_text() -> None:
