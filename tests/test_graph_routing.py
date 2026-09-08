@@ -32,6 +32,9 @@ from src.agent import graph as graph_module
         ("What's the weather like today?", "direct_response"),
         ("Remember that I work from the London office.", "remember_fact"),
         ("Please remember I use a MacBook Pro.", "remember_fact"),
+        ("What's the status of TCK-1001?", "action_request"),
+        ("Can you check ticket TCK-1002 for me?", "action_request"),
+        ("I need to reset my password, I forgot it.", "action_request"),
     ],
 )
 def test_classify_intent(message: str, expected_intent: str) -> None:
@@ -215,7 +218,9 @@ def test_describe_tool_result_unsupported_fallback() -> None:
 
 
 def test_execute_tool_ticket_status_extracts_real_id() -> None:
-    state = {"sanitized_message": "Check ticket status for TCK-1001", "user_id": "u-1"}
+    # TCK-1001's seeded owner is u-001 (src/tools/mcp_server.py) - the
+    # requesting user must match, or the new ownership gate denies it.
+    state = {"sanitized_message": "Check ticket status for TCK-1001", "user_id": "u-001"}
     result = graph_module.execute_tool(state)
     assert result["tool_result"]["ticket_id"] == "TCK-1001"
     assert result["tool_result"]["found"] is True
@@ -226,6 +231,56 @@ def test_execute_tool_ticket_status_missing_id_asks_for_one() -> None:
     result = graph_module.execute_tool(state)
     assert result["tool_result"] is None
     assert "provide a ticket ID" in result["response"]
+
+
+def test_execute_tool_ticket_status_from_natural_phrasing() -> None:
+    """A bare ticket ID (no literal 'ticket status' phrase) still routes to lookup.
+
+    Covers the sidebar ticket-lookup panel's prefilled text, e.g.
+    "ticket status TCK-1001" or "What's the status of TCK-1001?".
+    """
+    state = {"sanitized_message": "What's the status of TCK-1001?", "user_id": "u-001"}
+    result = graph_module.execute_tool(state)
+    assert result["tool_result"]["ticket_id"] == "TCK-1001"
+    assert result["tool_result"]["found"] is True
+
+
+def test_execute_tool_ticket_status_denies_another_users_ticket() -> None:
+    """An employee typing someone else's ticket ID must not see its details.
+
+    Found live: any user could read any TCK-#### by typing "ticket status
+    <id>" in the chat, regardless of who it belonged to - the sidebar panel
+    was correctly scoped per user, but the free-text chat path wasn't.
+    """
+    state = {"sanitized_message": "ticket status TCK-1001", "user_id": "u-999-not-the-owner"}
+    result = graph_module.execute_tool(state)
+    assert result["tool_result"] is None
+    assert "your own account" in result["response"]
+    assert "TCK-1001" in result["response"]
+
+
+def test_execute_tool_ticket_status_unknown_id_is_not_found_not_denied() -> None:
+    """A nonexistent ticket ID still gets the normal not-found response.
+
+    Ownership can only be checked for tickets that exist - get_ticket_owner
+    returns None here, which must fall through to the regular lookup (and
+    its not-found result) rather than a denial message.
+    """
+    state = {"sanitized_message": "ticket status TCK-9999", "user_id": "u-001"}
+    result = graph_module.execute_tool(state)
+    assert result["tool_result"]["found"] is False
+    assert "your own account" not in result["response"]
+
+
+def test_execute_tool_reset_my_password_phrasing() -> None:
+    """The guided reset form sends 'reset password: <reason>' - a plain 'reset
+    my password' phrasing must route the same way."""
+    state = {
+        "sanitized_message": "I need to reset my password, I forgot it after vacation.",
+        "user_id": "u-1",
+    }
+    result = graph_module.execute_tool(state)
+    assert result["tool_result"]["status"] in {"completed", "escalated"}
 
 
 # --- generate_grounded_answer (LLM client monkeypatched - no network) --------------------------------------------------------

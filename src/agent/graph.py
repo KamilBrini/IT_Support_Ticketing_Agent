@@ -14,7 +14,12 @@ from src.rag.retrieve import retrieve_context
 from src.schemas.models import AgentState
 from src.security.injection_guard import is_suspicious
 from src.security.pii_redaction import redact
-from src.tools.mcp_server import create_ticket, get_ticket_status, request_password_reset
+from src.tools.mcp_server import (
+    create_ticket,
+    get_ticket_owner,
+    get_ticket_status,
+    request_password_reset,
+)
 
 Intent = Literal[
     "policy_question",
@@ -164,6 +169,9 @@ def load_session_memory(state: AgentState) -> AgentState:
     return {"session_history": history, "user_facts": facts}
 
 
+_TICKET_ID_RE = re.compile(r"\bTCK-\d+\b", re.IGNORECASE)
+
+
 def classify_intent(state: AgentState) -> AgentState:
     """Classify request intent using simple deterministic keyword rules."""
     message = state.get("sanitized_message", "").casefold()
@@ -180,7 +188,25 @@ def classify_intent(state: AgentState) -> AgentState:
             intent = "remember_fact"
         elif any(keyword in message for keyword in ("policy", "vpn", "password policy", "guideline", "rule")):
             intent = "policy_question"
-        elif any(keyword in message for keyword in ("reset password", "ticket status", "create ticket", "open ticket")):
+        elif (
+            any(
+                keyword in message
+                for keyword in (
+                    "reset password",
+                    "reset my password",
+                    "ticket status",
+                    "check ticket",
+                    "create ticket",
+                    "open ticket",
+                )
+            )
+            or _TICKET_ID_RE.search(message)
+        ):
+            # A bare ticket ID (e.g. "what's the status of TCK-1001?") is
+            # treated as an action request even without the literal phrase
+            # "ticket status" - the UI's ticket-lookup panel prefills natural
+            # phrasing like this, and it shouldn't need to match a fixed
+            # sentence template to work.
             intent = "action_request"
         elif any(keyword in message for keyword in ("manager", "security", "legal", "human", "escalate")):
             intent = "escalation"
@@ -305,9 +331,6 @@ def generate_grounded_answer(state: AgentState) -> AgentState:
         return {"response": response}
 
 
-_TICKET_ID_RE = re.compile(r"\bTCK-\d+\b", re.IGNORECASE)
-
-
 def _describe_tool_result(tool_name: str, result: dict[str, Any]) -> str:
     """Build a short, human-readable sentence for a tool result.
 
@@ -317,8 +340,9 @@ def _describe_tool_result(tool_name: str, result: dict[str, Any]) -> str:
     """
     if tool_name == "get_ticket_status":
         if result.get("found"):
+            title_part = f" ('{result.get('title')}')" if result.get("title") else ""
             return (
-                f"Ticket {result.get('ticket_id')} is currently '{result.get('status')}' "
+                f"Ticket {result.get('ticket_id')}{title_part} is currently '{result.get('status')}' "
                 f"(queue: {result.get('assigned_queue') or 'n/a'})."
             )
         return f"I could not find ticket {result.get('ticket_id')}."
@@ -342,16 +366,32 @@ def execute_tool(state: AgentState) -> AgentState:
         },
     ) as span:
         result: dict[str, Any] | None
-        if "ticket status" in message_lower:
+        ticket_match = _TICKET_ID_RE.search(message)
+        if "ticket status" in message_lower or "check ticket" in message_lower or ticket_match:
             tool_name = "get_ticket_status"
-            ticket_match = _TICKET_ID_RE.search(message)
             if ticket_match is None:
                 result = None
                 response_text = "Please provide a ticket ID (e.g. TCK-1001) so I can look up its status."
             else:
-                result = get_ticket_status(ticket_match.group(0).upper()).model_dump(mode="json")
-                response_text = _describe_tool_result(tool_name, result)
-        elif "reset password" in message_lower:
+                ticket_id = ticket_match.group(0).upper()
+                owner = get_ticket_owner(ticket_id)
+                requesting_user = state.get("user_id", "")
+                # An employee-facing agent should only surface *your own*
+                # tickets by ID - without this, anyone could enumerate any
+                # TCK-#### and read another employee's ticket details.
+                # owner is None for a genuinely nonexistent ID, which falls
+                # through to get_ticket_status's normal not-found response
+                # instead of a denial (no reason to distinguish the two).
+                if owner is not None and owner != requesting_user:
+                    result = None
+                    response_text = (
+                        f"I can only share ticket details for your own account. "
+                        f"{ticket_id} isn't associated with your account."
+                    )
+                else:
+                    result = get_ticket_status(ticket_id).model_dump(mode="json")
+                    response_text = _describe_tool_result(tool_name, result)
+        elif "reset password" in message_lower or "reset my password" in message_lower:
             tool_name = "request_password_reset"
             result = request_password_reset(user_id=state.get("user_id", "unknown"), reason=message)
             response_text = _describe_tool_result(tool_name, result)

@@ -250,6 +250,7 @@ class TicketStatusResponse(BaseModel):
 
     found: bool
     ticket_id: str
+    title: str | None = None
     status: TicketStatus | None = None
     assigned_queue: str | None = None
     escalation_level: int | None = None

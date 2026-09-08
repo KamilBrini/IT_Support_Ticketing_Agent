@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from src.agent.graph import agent_graph
 from src.schemas.models import AgentState, ChatRequest, TicketStatusResponse
 from src.security.pii_redaction import redact
-from src.tools.mcp_server import get_ticket_status
+from src.tools.mcp_server import get_ticket_status, list_tickets_for_user
 
 # Load .env at process startup so NVIDIA_NIM_API_KEY etc. are actually
 # picked up when running `uvicorn src.api.main:app` — nothing else in this
@@ -41,6 +41,12 @@ def health() -> dict[str, Any]:
 def get_ticket(ticket_id: str) -> TicketStatusResponse:
     """Return ticket status using the MCP tool wrapper."""
     return get_ticket_status(ticket_id)
+
+
+@app.get("/tickets", response_model=list[TicketStatusResponse])
+def list_tickets(user_id: str) -> list[TicketStatusResponse]:
+    """Return every ticket owned by this user - read-only sidebar convenience."""
+    return list_tickets_for_user(user_id)
 
 
 @app.post("/chat")
