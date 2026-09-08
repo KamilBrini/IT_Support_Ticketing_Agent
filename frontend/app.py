@@ -57,12 +57,12 @@ def _escalation_accent(level: int | None) -> str:
     of inventing data the backend doesn't return.
     """
     if level is None:
-        return "#94A3B8"
+        return "#6B7280"
     if level >= 2:
-        return "#EF4444"
+        return "#F87171"
     if level == 1:
         return "#F59E0B"
-    return "#94A3B8"
+    return "#6B7280"
 
 
 def _badge(label: str, css_class: str) -> str:
@@ -74,20 +74,27 @@ def inject_custom_css() -> None:
 
     Presentation only: fonts, hiding Streamlit chrome, card/badge styling.
     Nothing here reads or writes session_state or talks to the backend.
+
+    Dark base (#0D0D0D/#161616) + lime green (#5FFB07) accent - FDM Group's
+    palette. The actual theme-of-record is .streamlit/config.toml ([theme]
+    base="dark", primaryColor="#5FFB07", ...) - that's what makes *native*
+    widgets (chat bubbles, text inputs, the selectbox) consistently dark.
+    This CSS only styles the custom elements config.toml can't reach
+    (badges, result cards, the header bar) and needs to agree with it, not
+    fight it - the first version of this page had light-hardcoded custom
+    cards sitting next to native widgets that followed the browser's own
+    dark-mode preference, so a chat reply's dark text landed on a dark
+    background from an unrelated source - invisible text.
     """
-    # st.html(), not st.markdown(unsafe_allow_html=True): markdown's parser
-    # treats blank lines inside the HTML as paragraph breaks and renders
-    # the CSS as literal visible text instead of applying it - observed
-    # live, the entire stylesheet showed up as text on the page. st.html()
-    # inserts raw HTML/CSS directly with no markdown pass, which is exactly
-    # what a <style> block needs.
     st.html(
         """
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-
+        /* System font stack, not a Google Fonts @import: an external font
+           fetch was adding a real network round-trip to first render -
+           noticeable on the initial page load. Segoe UI/system-ui look
+           clean and were an accepted alternative to Inter from the start. */
         html, body, [class*="css"] {
-            font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
         }
 
         /* --- Hide Streamlit chrome, keep the status/running spinner --- */
@@ -97,46 +104,46 @@ def inject_custom_css() -> None:
         div[data-testid="stToolbar"] { visibility: hidden; }
         div[data-testid="stDecoration"] { visibility: hidden; }
 
-        [data-testid="stAppViewContainer"] { background: #F8FAFC; }
         .block-container { padding-top: 1.25rem; max-width: 1200px; }
 
         /* --- Sidebar --- */
         [data-testid="stSidebar"] {
-            background: #FFFFFF;
-            border-right: 1px solid #E2E8F0;
+            border-right: 1px solid #2A2A2A;
             width: 350px !important;
         }
-        [data-testid="stSidebar"] h2 { font-size: 0.95rem; color: #0F172A; }
+        [data-testid="stSidebar"] h2 { font-size: 0.95rem; color: #F2F2F2; }
 
         /* --- Buttons --- */
         .stButton > button {
             border-radius: 8px;
-            border: 1px solid #E2E8F0;
+            border: 1px solid #2A2A2A;
             font-weight: 500;
             transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
         }
         .stButton > button:hover {
-            border-color: #4F46E5;
-            color: #4F46E5;
+            border-color: #5FFB07;
+            color: #5FFB07;
             transform: translateY(-1px);
-            box-shadow: 0 4px 10px rgba(79, 70, 229, 0.15);
+            box-shadow: 0 4px 12px rgba(95, 251, 7, 0.18);
         }
         .stButton > button[kind="primary"] {
-            background: #4F46E5;
+            background: #5FFB07;
             border: none;
-            box-shadow: 0 2px 6px rgba(79, 70, 229, 0.35);
+            color: #0D0D0D;
+            font-weight: 700;
+            box-shadow: 0 2px 10px rgba(95, 251, 7, 0.35);
         }
         .stButton > button[kind="primary"]:hover {
-            background: #4338CA;
-            color: #FFFFFF;
+            background: #7CFF33;
+            color: #0D0D0D;
         }
 
         /* --- st.container(border=True) -> premium card --- */
         div[data-testid="stVerticalBlockBorderWrapper"] {
             border-radius: 14px !important;
-            border: 1px solid #E2E8F0 !important;
-            box-shadow: 0 1px 4px rgba(15, 23, 42, 0.06);
-            background: #FFFFFF;
+            border: 1px solid #2A2A2A !important;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+            background: #161616;
         }
 
         /* --- Header bar --- */
@@ -144,38 +151,38 @@ def inject_custom_css() -> None:
             display: flex;
             align-items: center;
             gap: 16px;
-            background: #FFFFFF;
-            border: 1px solid #E2E8F0;
+            background: #161616;
+            border: 1px solid #2A2A2A;
             border-radius: 14px;
             padding: 18px 24px;
             margin-bottom: 18px;
-            box-shadow: 0 1px 4px rgba(15, 23, 42, 0.06);
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
         }
         .app-header__icon {
             font-size: 26px;
             width: 46px; height: 46px;
             display: flex; align-items: center; justify-content: center;
-            background: #EEF2FF;
+            background: rgba(95, 251, 7, 0.12);
             border-radius: 12px;
             flex-shrink: 0;
         }
-        .app-header__name { font-size: 1.3rem; font-weight: 800; color: #0F172A; line-height: 1.2; }
-        .app-header__subtitle { font-size: 0.85rem; color: #64748B; margin-top: 2px; }
+        .app-header__name { font-size: 1.3rem; font-weight: 800; color: #FFFFFF; line-height: 1.2; }
+        .app-header__subtitle { font-size: 0.85rem; color: #A0A0A0; margin-top: 2px; }
 
         /* --- Stat cards --- */
         .stat-card {
-            background: #FFFFFF;
-            border: 1px solid #E2E8F0;
-            border-left: 4px solid var(--accent, #94A3B8);
+            background: #161616;
+            border: 1px solid #2A2A2A;
+            border-left: 4px solid var(--accent, #5FFB07);
             border-radius: 10px;
             padding: 12px 16px;
-            box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
         }
         .stat-card__label {
             font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em;
-            color: #64748B; font-weight: 700;
+            color: #A0A0A0; font-weight: 700;
         }
-        .stat-card__value { font-size: 1.55rem; font-weight: 800; color: #0F172A; margin-top: 2px; }
+        .stat-card__value { font-size: 1.55rem; font-weight: 800; color: #F2F2F2; margin-top: 2px; }
 
         /* --- Badges --- */
         .badge {
@@ -187,36 +194,36 @@ def inject_custom_css() -> None:
             letter-spacing: 0.01em;
             white-space: nowrap;
         }
-        .badge-open { background: #EFF6FF; color: #1D4ED8; }
-        .badge-in_progress { background: #FFFBEB; color: #B45309; }
-        .badge-waiting_user { background: #F5F3FF; color: #6D28D9; }
-        .badge-resolved { background: #ECFDF5; color: #047857; }
-        .badge-closed { background: #F1F5F9; color: #475569; }
-        .badge-completed { background: #ECFDF5; color: #047857; }
-        .badge-escalated { background: #FFFBEB; color: #B45309; }
-        .badge-rejected { background: #FEF2F2; color: #B91C1C; }
-        .badge-created { background: #ECFDF5; color: #047857; }
+        .badge-open { background: rgba(96, 165, 250, 0.15); color: #93C5FD; }
+        .badge-in_progress { background: rgba(251, 191, 36, 0.15); color: #FCD34D; }
+        .badge-waiting_user { background: rgba(196, 181, 253, 0.15); color: #DDD6FE; }
+        .badge-resolved { background: rgba(52, 211, 153, 0.15); color: #6EE7B7; }
+        .badge-closed { background: rgba(156, 163, 175, 0.18); color: #D1D5DB; }
+        .badge-completed { background: rgba(52, 211, 153, 0.15); color: #6EE7B7; }
+        .badge-escalated { background: rgba(251, 191, 36, 0.15); color: #FCD34D; }
+        .badge-rejected { background: rgba(248, 113, 113, 0.15); color: #FCA5A5; }
+        .badge-created { background: rgba(52, 211, 153, 0.15); color: #6EE7B7; }
 
         /* --- Result cards (ticket / reset / creation) --- */
         .result-card {
             border-radius: 10px;
-            border: 1px solid #E2E8F0;
-            border-left: 4px solid var(--accent, #94A3B8);
-            background: #FFFFFF;
+            border: 1px solid #2A2A2A;
+            border-left: 4px solid var(--accent, #5FFB07);
+            background: #1B1B1B;
             padding: 12px 16px;
             margin: 6px 0 2px 0;
-            box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
         }
         .result-card__title {
-            font-weight: 700; color: #0F172A; margin-bottom: 6px;
+            font-weight: 700; color: #F2F2F2; margin-bottom: 6px;
             display: flex; align-items: center; justify-content: space-between; gap: 8px;
         }
-        .result-card__row { font-size: 0.86rem; color: #334155; margin: 2px 0; }
-        .result-card__row b { color: #0F172A; }
+        .result-card__row { font-size: 0.86rem; color: #C4C4C4; margin: 2px 0; }
+        .result-card__row b { color: #F2F2F2; }
 
         /* --- Empty chat hint --- */
         .empty-chat-hint {
-            text-align: center; padding: 36px 12px; color: #94A3B8; font-size: 0.92rem;
+            text-align: center; padding: 36px 12px; color: #7A7A7A; font-size: 0.92rem;
         }
 
         /* --- Subtle entrance animation for new chat turns --- */
@@ -510,7 +517,7 @@ def render_tool_result(tool_result: Any) -> None:
             )
         else:
             st.markdown(
-                f'''<div class="result-card" style="--accent:#EF4444">
+                f'''<div class="result-card" style="--accent:#F87171">
                     <div class="result-card__title">
                         <span>🎫 {tool_result.get("ticket_id")}</span>{_badge("Not found", "badge-rejected")}
                     </div>
@@ -522,7 +529,7 @@ def render_tool_result(tool_result: Any) -> None:
 
     if "status" in tool_result and "next_action" in tool_result:
         status_val = str(tool_result.get("status", "")).lower()
-        accent = {"completed": "#10B981", "escalated": "#F59E0B"}.get(status_val, "#EF4444")
+        accent = {"completed": "#34D399", "escalated": "#FBBF24"}.get(status_val, "#F87171")
         badge_class = {"completed": "badge-completed", "escalated": "badge-escalated"}.get(
             status_val, "badge-rejected"
         )
@@ -540,7 +547,7 @@ def render_tool_result(tool_result: Any) -> None:
     if "ticket_id" in tool_result and "status" in tool_result and "message" in tool_result:
         status_val = str(tool_result.get("status", "")).lower()
         is_created = status_val == "created"
-        accent = "#10B981" if is_created else "#EF4444"
+        accent = "#34D399" if is_created else "#F87171"
         badge_class = "badge-created" if is_created else "badge-rejected"
         st.markdown(
             f'''<div class="result-card" style="--accent:{accent}">
@@ -567,10 +574,10 @@ st.markdown(
 
 stat_cols = st.columns(4)
 _stat_values = [
-    ("My Tickets", len(my_tickets), "#4F46E5"),
-    ("Open", sum(1 for t in my_tickets if t.get("status") == "open"), "#3B82F6"),
-    ("In Progress", sum(1 for t in my_tickets if t.get("status") == "in_progress"), "#F59E0B"),
-    ("Resolved", sum(1 for t in my_tickets if t.get("status") in ("resolved", "closed")), "#10B981"),
+    ("My Tickets", len(my_tickets), "#5FFB07"),
+    ("Open", sum(1 for t in my_tickets if t.get("status") == "open"), "#60A5FA"),
+    ("In Progress", sum(1 for t in my_tickets if t.get("status") == "in_progress"), "#FBBF24"),
+    ("Resolved", sum(1 for t in my_tickets if t.get("status") in ("resolved", "closed")), "#34D399"),
 ]
 for col, (label, value, accent) in zip(stat_cols, _stat_values):
     with col:
