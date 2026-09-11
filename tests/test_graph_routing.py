@@ -32,6 +32,15 @@ from src.agent import graph as graph_module
         ("What's the weather like today?", "direct_response"),
         ("Remember that I work from the London office.", "remember_fact"),
         ("Please remember I use a MacBook Pro.", "remember_fact"),
+        ("What's the status of TCK-1001?", "action_request"),
+        ("Can you check ticket TCK-1002 for me?", "action_request"),
+        ("I need to reset my password, I forgot it.", "action_request"),
+        ("Do I have a ticket open?", "action_request"),
+        ("Do I have any tickets?", "action_request"),
+        ("Give me a list of what policy questions I can ask?", "direct_response"),
+        ("What can you do?", "direct_response"),
+        ("create another ticket for me, I can't login", "action_request"),
+        ("can I know all the tickets statuses", "action_request"),
     ],
 )
 def test_classify_intent(message: str, expected_intent: str) -> None:
@@ -120,15 +129,62 @@ def test_route_after_retrieval_with_context() -> None:
 
 
 def test_route_after_retrieval_without_context() -> None:
-    assert graph_module._route_after_retrieval({"retrieved_context": None}) == "escalate"
+    assert graph_module._route_after_retrieval({"retrieved_context": None}) == "direct_response"
 
 
 # --- terminal response nodes --------------------------------------------------------
 
 
-def test_direct_response_text() -> None:
-    result = graph_module.direct_response({"intent": "direct_response"})
+def test_direct_response_falls_back_when_llm_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise() -> None:
+        raise RuntimeError("no API key configured")
+
+    monkeypatch.setattr(graph_module, "get_llm_client", _raise)
+    result = graph_module.direct_response({"intent": "direct_response", "sanitized_message": "hi"})
     assert "IT support" in result["response"]
+
+
+def test_direct_response_fallback_greets_known_employee_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise() -> None:
+        raise RuntimeError("no API key configured")
+
+    monkeypatch.setattr(graph_module, "get_llm_client", _raise)
+    result = graph_module.direct_response(
+        {"intent": "direct_response", "sanitized_message": "hi", "user_id": "u-001"}
+    )
+    assert result["response"].startswith("Hi Alice!")
+
+
+def test_direct_response_uses_llm_output_when_valid(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeClient:
+        provider = "fake"
+        model = "fake-model"
+
+        def generate(self, *, system: str, user: str, **_: object) -> str:
+            assert "Alice" in user
+            return "Hi Alice! I can check ticket status, reset passwords, and answer policy questions."
+
+    monkeypatch.setattr(graph_module, "get_llm_client", lambda: _FakeClient())
+    result = graph_module.direct_response(
+        {"intent": "direct_response", "sanitized_message": "hi", "user_id": "u-001"}
+    )
+    assert result["response"] == "Hi Alice! I can check ticket status, reset passwords, and answer policy questions."
+
+
+def test_direct_response_no_name_for_unknown_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeClient:
+        provider = "fake"
+        model = "fake-model"
+
+        def generate(self, *, system: str, user: str, **_: object) -> str:
+            assert "first name" not in user
+            return "Hi there! I can check ticket status, reset passwords, and answer policy questions."
+
+    monkeypatch.setattr(graph_module, "get_llm_client", lambda: _FakeClient())
+    result = graph_module.direct_response(
+        {"intent": "direct_response", "sanitized_message": "hi", "user_id": "custom-test-id"}
+    )
+    assert "Hi there" in result["response"]
 
 
 def test_blocked_response_sets_intent_and_text() -> None:
@@ -215,7 +271,9 @@ def test_describe_tool_result_unsupported_fallback() -> None:
 
 
 def test_execute_tool_ticket_status_extracts_real_id() -> None:
-    state = {"sanitized_message": "Check ticket status for TCK-1001", "user_id": "u-1"}
+    # TCK-1001's seeded owner is u-001 (src/tools/mcp_server.py) - the
+    # requesting user must match, or the new ownership gate denies it.
+    state = {"sanitized_message": "Check ticket status for TCK-1001", "user_id": "u-001"}
     result = graph_module.execute_tool(state)
     assert result["tool_result"]["ticket_id"] == "TCK-1001"
     assert result["tool_result"]["found"] is True
@@ -226,6 +284,143 @@ def test_execute_tool_ticket_status_missing_id_asks_for_one() -> None:
     result = graph_module.execute_tool(state)
     assert result["tool_result"] is None
     assert "provide a ticket ID" in result["response"]
+
+
+def test_execute_tool_ticket_status_from_natural_phrasing() -> None:
+    """A bare ticket ID (no literal 'ticket status' phrase) still routes to lookup.
+
+    Covers the sidebar ticket-lookup panel's prefilled text, e.g.
+    "ticket status TCK-1001" or "What's the status of TCK-1001?".
+    """
+    state = {"sanitized_message": "What's the status of TCK-1001?", "user_id": "u-001"}
+    result = graph_module.execute_tool(state)
+    assert result["tool_result"]["ticket_id"] == "TCK-1001"
+    assert result["tool_result"]["found"] is True
+
+
+def test_execute_tool_ticket_status_denies_another_users_ticket() -> None:
+    """An employee typing someone else's ticket ID must not see its details.
+
+    Found live: any user could read any TCK-#### by typing "ticket status
+    <id>" in the chat, regardless of who it belonged to - the sidebar panel
+    was correctly scoped per user, but the free-text chat path wasn't.
+    """
+    state = {"sanitized_message": "ticket status TCK-1001", "user_id": "u-999-not-the-owner"}
+    result = graph_module.execute_tool(state)
+    assert result["tool_result"] is None
+    assert "your own account" in result["response"]
+    assert "TCK-1001" in result["response"]
+
+
+def test_execute_tool_ticket_status_unknown_id_is_not_found_not_denied() -> None:
+    """A nonexistent ticket ID still gets the normal not-found response.
+
+    Ownership can only be checked for tickets that exist - get_ticket_owner
+    returns None here, which must fall through to the regular lookup (and
+    its not-found result) rather than a denial message.
+    """
+    state = {"sanitized_message": "ticket status TCK-9999", "user_id": "u-001"}
+    result = graph_module.execute_tool(state)
+    assert result["tool_result"]["found"] is False
+    assert "your own account" not in result["response"]
+
+
+def test_execute_tool_reset_my_password_phrasing() -> None:
+    """The guided reset form sends 'reset password: <reason>' - a plain 'reset
+    my password' phrasing must route the same way."""
+    state = {
+        "sanitized_message": "I need to reset my password, I forgot it after vacation.",
+        "user_id": "u-1",
+    }
+    result = graph_module.execute_tool(state)
+    assert result["tool_result"]["status"] in {"completed", "escalated"}
+
+
+def test_execute_tool_create_ticket_with_natural_phrasing() -> None:
+    """"Create ANOTHER ticket" doesn't contain the literal phrase "create
+    ticket" (a word sits in between) - found live, this silently fell
+    through to a decline instead of actually creating the ticket.
+
+    Uses a throwaway user_id, not u-001/u-002/u-010/u-021 - those are the
+    seeded owners other tests count tickets against (e.g.
+    test_mcp_tools.py's test_list_tickets_for_user_returns_only_that_users_tickets
+    expects exactly u-001's one seeded ticket); creating a ticket for one of
+    them here would silently break that count for the rest of the run.
+    """
+    state = {
+        "sanitized_message": "create another ticket for me, I can't login into my computer account.",
+        "user_id": "u-test-create-ticket-1",
+    }
+    result = graph_module.execute_tool(state)
+    assert result["tool_result"]["status"] == "created"
+    assert result["tool_result"]["ticket_id"] is not None
+
+
+def test_execute_tool_create_ticket_categorizes_from_description() -> None:
+    state = {
+        "sanitized_message": "create ticket: my laptop won't boot",
+        "user_id": "u-test-create-ticket-2",
+    }
+    result = graph_module.execute_tool(state)
+    assert "hardware" in result["response"]
+    assert result["tool_result"]["status"] == "created"
+
+
+def test_execute_tool_list_all_tickets() -> None:
+    # u-001 (Alice) owns exactly TCK-1001 in the seeded data.
+    state = {"sanitized_message": "can I know all the tickets statuses", "user_id": "u-001"}
+    result = graph_module.execute_tool(state)
+    assert isinstance(result["tool_result"], list)
+    assert any(t["ticket_id"] == "TCK-1001" for t in result["tool_result"])
+    assert "TCK-1001" in result["response"]
+
+
+def test_execute_tool_list_all_tickets_empty_for_unknown_user() -> None:
+    state = {"sanitized_message": "list my tickets", "user_id": "u-nobody"}
+    result = graph_module.execute_tool(state)
+    assert result["tool_result"] == []
+    assert "don't have any tickets" in result["response"]
+
+
+def test_execute_tool_complete_ticket_declines_instead_of_silently_just_checking() -> None:
+    """Asking it to "finish"/"complete" a ticket must not look like the
+    request was carried out - found live: it silently answered with only
+    the ticket's status, which reads as if closing it had actually happened."""
+    state = {
+        "sanitized_message": "I need you to finish the TCK-1001 ticket",
+        "user_id": "u-001",
+    }
+    result = graph_module.execute_tool(state)
+    assert "can't close, complete, or resolve" in result["response"]
+    assert "TCK-1001" in result["response"]
+    assert result["tool_result"]["found"] is True  # status is still surfaced as context
+
+
+def test_categorize_ticket_hardware() -> None:
+    assert graph_module._categorize_ticket("my laptop won't boot") == "hardware"
+
+
+def test_categorize_ticket_network() -> None:
+    assert graph_module._categorize_ticket("cannot connect to VPN from home") == "network"
+
+
+def test_categorize_ticket_security() -> None:
+    assert graph_module._categorize_ticket("I'm locked out of my account") == "security"
+
+
+def test_categorize_ticket_defaults_to_general() -> None:
+    assert graph_module._categorize_ticket("something is wrong") == "general"
+
+
+def test_extract_ticket_title_strips_trigger_phrase() -> None:
+    title = graph_module._extract_ticket_title(
+        "create another ticket for me, I can't login into my computer account."
+    )
+    assert title.startswith("I can't login")
+
+
+def test_extract_ticket_title_falls_back_to_generic_when_nothing_left() -> None:
+    assert graph_module._extract_ticket_title("create ticket") == "User-created support request"
 
 
 # --- generate_grounded_answer (LLM client monkeypatched - no network) --------------------------------------------------------

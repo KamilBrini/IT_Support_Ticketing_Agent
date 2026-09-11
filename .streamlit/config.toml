@@ -1,0 +1,15 @@
+[theme]
+# FDM Group brand palette: lime green accent on a near-black base.
+# Setting this here (not just in custom CSS) is what actually themes every
+# *native* Streamlit widget consistently - chat message bubbles, text
+# inputs, the selectbox, buttons, expanders. A previous CSS-only attempt
+# left some native elements on Streamlit's default light theme while
+# custom-styled elements went dark, so a chat bubble's dark text sat on a
+# dark background from browser dark-mode leaking through unstyled parts -
+# invisible text. This is the root-cause fix, not a per-element patch.
+base = "dark"
+primaryColor = "#5FFB07"
+backgroundColor = "#0D0D0D"
+secondaryBackgroundColor = "#161616"
+textColor = "#F2F2F2"
+font = "sans serif"

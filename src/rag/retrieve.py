@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.rag.chroma_client import get_client
+from src.rag.chroma_client import collection_operation_lock, get_client
 from src.rag.embeddings import build_embedding_function
 
 COLLECTION_NAME = "it_policy_docs"
@@ -24,12 +24,12 @@ def retrieve_context(query: str, k: int = 3) -> list[str]:
     k = max(1, k)
     client = get_client()
 
-    collection = client.get_or_create_collection(
-        name=COLLECTION_NAME,
-        embedding_function=build_embedding_function(),
-    )
-
-    result = collection.query(query_texts=[query], n_results=k, include=["documents", "distances"])
+    with collection_operation_lock():
+        collection = client.get_or_create_collection(
+            name=COLLECTION_NAME,
+            embedding_function=build_embedding_function(),
+        )
+        result = collection.query(query_texts=[query], n_results=k, include=["documents", "distances"])
     docs = result.get("documents", [])
     distances = result.get("distances", [])
     if not docs:

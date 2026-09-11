@@ -120,6 +120,7 @@ def get_ticket_status(ticket_id: str) -> TicketStatusResponse:
             return TicketStatusResponse(
                 found=True,
                 ticket_id=ticket.ticket_id,
+                title=ticket.title,
                 status=ticket.status,
                 assigned_queue=ticket.assigned_queue,
                 escalation_level=ticket.escalation_level,
@@ -129,6 +130,45 @@ def get_ticket_status(ticket_id: str) -> TicketStatusResponse:
             )
 
     return _not_found_response(request.ticket_id)
+
+
+def get_ticket_owner(ticket_id: str) -> str | None:
+    """Return the requester_user_id of a ticket, or None if it doesn't exist.
+
+    Not an MCP tool - an internal helper so the graph's execute_tool node
+    can enforce "employees only see their own tickets" before handing a
+    result to get_ticket_status, without changing that tool's public shape.
+    """
+    normalized = ticket_id.strip().upper()
+    for ticket in _TICKETS:
+        if ticket.ticket_id == normalized:
+            return ticket.requester_user_id
+    return None
+
+
+@mcp.tool()
+def list_tickets_for_user(user_id: str) -> list[TicketStatusResponse]:
+    """Return status entries for every ticket owned by this user.
+
+    Read-only UI convenience for the frontend's ticket-lookup sidebar panel -
+    deliberately outside the LangGraph state machine (no routing, no LLM, no
+    memory writes) so it carries zero risk to the tested agent flow.
+    """
+    return [
+        TicketStatusResponse(
+            found=True,
+            ticket_id=ticket.ticket_id,
+            title=ticket.title,
+            status=ticket.status,
+            assigned_queue=ticket.assigned_queue,
+            escalation_level=ticket.escalation_level,
+            updated_at=ticket.updated_at,
+            error_code=None,
+            message=None,
+        )
+        for ticket in _TICKETS
+        if ticket.requester_user_id == user_id
+    ]
 
 
 @mcp.tool()

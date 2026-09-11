@@ -86,7 +86,22 @@ class LLMClient:
             raise LLMConfigError(f"{cfg.model_env} is not set")
 
         base_url = os.getenv(cfg.base_url_env, cfg.default_base_url) if cfg.base_url_env else None
-        self._client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
+        # Explicit timeout, not the SDK default (600s): without this, a slow
+        # or hung provider call can run far longer than the frontend's own
+        # 60s request timeout - the user sees "could not reach the backend"
+        # (a client-side give-up) while the backend is actually still
+        # waiting on the LLM with no end in sight, and generate_grounded_
+        # answer's try/except fallback never triggers because nothing ever
+        # raises. 45s leaves headroom under the frontend's budget while
+        # still covering NVIDIA NIM's documented worst-case cold start
+        # (30-45s) - a call that's slower than that now fails fast and
+        # falls back to the deterministic template instead of hanging.
+        timeout = 45.0
+        self._client = (
+            OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+            if base_url
+            else OpenAI(api_key=api_key, timeout=timeout)
+        )
         self._extra_body = cfg.extra_body
 
     def generate(self, *, system: str, user: str, max_tokens: int = 700, temperature: float = 0.2) -> str:

@@ -130,14 +130,14 @@ tests:
           - "ERR-NOT-FOUND"
           - "escalat"
 
-  - description: Edge - Out-of-scope policy question should escalate
+  - description: Edge - Out-of-scope policy question should decline, not hallucinate or escalate
     vars:
       input: "What is our official policy for lunar mining operations on Mars?"
     assert:
-      - type: contains
-        value: "escalating"
       - type: not-contains
         value: "Based on policy documents"
+      - type: not-contains
+        value: "escalating this to a human"
 
   - description: Edge - Empty message should be rejected
     vars:
