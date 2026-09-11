@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 
-from src.rag.chroma_client import get_client
+from src.rag.chroma_client import collection_operation_lock, get_client
 from src.rag.embeddings import build_embedding_function
 
 _COLLECTION_PREFIX = "user_memory_"
@@ -56,23 +56,24 @@ def remember_fact(user_id: str, fact: str) -> None:
     fact = fact.strip()
     if not fact or not user_id.strip():
         return
-    collection = _get_collection(user_id)
-    fact_id = f"fact-{collection.count()}"
-    collection.add(documents=[fact], ids=[fact_id])
+    with collection_operation_lock():
+        collection = _get_collection(user_id)
+        fact_id = f"fact-{collection.count()}"
+        collection.add(documents=[fact], ids=[fact_id])
 
 
 def recall_facts(user_id: str, query: str, k: int = 3) -> list[str]:
     """Return this user's stored facts relevant to `query`, closest first."""
     if not user_id.strip() or not query.strip():
         return []
-    collection = _get_collection(user_id)
-    count = collection.count()
-    if count == 0:
-        return []
-
-    result = collection.query(
-        query_texts=[query], n_results=min(k, count), include=["documents", "distances"]
-    )
+    with collection_operation_lock():
+        collection = _get_collection(user_id)
+        count = collection.count()
+        if count == 0:
+            return []
+        result = collection.query(
+            query_texts=[query], n_results=min(k, count), include=["documents", "distances"]
+        )
     docs = result.get("documents") or [[]]
     distances = result.get("distances") or [[]]
     first_docs = docs[0] if docs else []

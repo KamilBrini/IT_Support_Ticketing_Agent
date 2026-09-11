@@ -18,6 +18,7 @@ from src.tools.mcp_server import (
     create_ticket,
     get_ticket_owner,
     get_ticket_status,
+    list_tickets_for_user,
     request_password_reset,
 )
 
@@ -172,6 +173,36 @@ def load_session_memory(state: AgentState) -> AgentState:
 _TICKET_ID_RE = re.compile(r"\bTCK-\d+\b", re.IGNORECASE)
 
 
+def _mentions_create_ticket(message: str) -> bool:
+    """True for natural create-ticket phrasing, not just the exact phrase.
+
+    "Create ANOTHER ticket for me" or "open a new ticket" don't contain the
+    literal substring "create ticket" (a word sits in between), so the
+    original exact-phrase check silently missed them and fell through to a
+    generic decline instead of actually creating the ticket - a real gap
+    caught live when a user typed exactly that phrasing. Shared by
+    classify_intent and execute_tool so they can't drift out of sync.
+    """
+    if "create ticket" in message or "open ticket" in message:
+        return True
+    return "ticket" in message and ("create" in message or "new ticket" in message)
+
+
+_LIST_ALL_TICKETS_PHRASES = (
+    "all my ticket",
+    "all the ticket",
+    "all ticket",
+    "list my ticket",
+    "my tickets",
+    "every ticket",
+)
+
+
+def _mentions_list_all_tickets(message: str) -> bool:
+    """True for "what are all my tickets" style requests (no single ticket ID)."""
+    return "ticket" in message and any(phrase in message for phrase in _LIST_ALL_TICKETS_PHRASES)
+
+
 def classify_intent(state: AgentState) -> AgentState:
     """Classify request intent using simple deterministic keyword rules."""
     message = state.get("sanitized_message", "").casefold()
@@ -186,6 +217,25 @@ def classify_intent(state: AgentState) -> AgentState:
             intent: Intent = "blocked"
         elif any(keyword in message for keyword in ("remember that", "remember my", "please remember")):
             intent = "remember_fact"
+        elif any(
+            # Checked before the "policy" keyword below on purpose - "give me
+            # a list of what policy questions I can ask" contains "policy"
+            # but is a question about the assistant's own capabilities, not
+            # an actual policy lookup. Routing it into RAG retrieval finds no
+            # semantic match and wrongly escalates a perfectly normal
+            # "what can you help with" question to a human.
+            keyword in message
+            for keyword in (
+                "what can you do",
+                "what can you help",
+                "what can i ask",
+                "questions can i ask",
+                "questions i can ask",
+                "list of policy questions",
+                "what topics can i ask",
+            )
+        ):
+            intent = "direct_response"
         elif any(keyword in message for keyword in ("policy", "vpn", "password policy", "guideline", "rule")):
             intent = "policy_question"
         elif (
@@ -196,10 +246,13 @@ def classify_intent(state: AgentState) -> AgentState:
                     "reset my password",
                     "ticket status",
                     "check ticket",
-                    "create ticket",
-                    "open ticket",
+                    "ticket open",
+                    "have a ticket",
+                    "have any ticket",
                 )
             )
+            or _mentions_create_ticket(message)
+            or _mentions_list_all_tickets(message)
             or _TICKET_ID_RE.search(message)
         ):
             # A bare ticket ID (e.g. "what's the status of TCK-1001?") is
@@ -355,6 +408,66 @@ def _describe_tool_result(tool_name: str, result: dict[str, Any]) -> str:
     return result.get("next_action") or "I don't have an automated action for that request."
 
 
+_TICKET_MODIFY_VERBS = ("complete", "close", "finish", "resolve", "cancel")
+
+
+def _describe_all_tickets(tickets: list[dict[str, Any]]) -> str:
+    """Build a short spoken summary of every ticket owned by this user."""
+    if not tickets:
+        return "You don't have any tickets on file."
+    lines = [f"{t.get('ticket_id')} ('{t.get('title')}') - {t.get('status')}" for t in tickets]
+    return "Here are all your tickets: " + "; ".join(lines) + "."
+
+
+_TICKET_CATEGORY_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("network", ("vpn", "wifi", "wi-fi", "network", "internet", "connect")),
+    ("hardware", ("laptop", "monitor", "keyboard", "mouse", "printer", "hardware", "device", "battery", "boot")),
+    ("software", ("software", "install", "license", "application", "app ", "update")),
+    ("security", ("password", "login", "log in", "account", "locked", "access", "credential", "mfa", "2fa")),
+)
+
+
+def _categorize_ticket(description: str) -> str:
+    """Deterministic keyword-based category guess for a new ticket.
+
+    Same philosophy as classify_intent - simple, explainable rules rather
+    than an LLM call for something this low-stakes. A wrong guess here just
+    means a slightly mis-routed queue for a human triager to correct, never
+    a safety-relevant decision, so it doesn't need the LLM's judgment.
+    """
+    lower = description.casefold()
+    for category, keywords in _TICKET_CATEGORY_KEYWORDS:
+        if any(keyword in lower for keyword in keywords):
+            return category
+    return "general"
+
+
+_TICKET_TITLE_PREFIX_RE = re.compile(
+    r"^(create|open|raise|log|file|submit)\s+(a\s+|another\s+|a\s+new\s+|new\s+)?ticket\s*(for\s+me)?[:,\-]?\s*",
+    re.IGNORECASE,
+)
+
+
+def _extract_ticket_title(message: str) -> str:
+    """Turn the raw request into a real ticket title instead of a generic one.
+
+    Every auto-created ticket used to get the exact same placeholder title
+    ("User-created support request") regardless of what was actually wrong -
+    directly the thing flagged in early feedback ("I don't know what sort of
+    problem they were dealing with"). Strips the trigger phrase and keeps
+    the actual issue description, same idea as _extract_fact_text.
+    """
+    stripped = _TICKET_TITLE_PREFIX_RE.sub("", message).strip()
+    if not stripped:
+        # The message was just the trigger phrase itself ("create ticket",
+        # nothing else) - falling back to the raw message here would just
+        # put the literal words "create ticket" back as the title.
+        return "User-created support request"
+    if len(stripped) > 80:
+        stripped = stripped[:80].rstrip() + "..."
+    return stripped[0].upper() + stripped[1:]
+
+
 def execute_tool(state: AgentState) -> AgentState:
     """Execute a basic tool action based on user request patterns."""
     message = state.get("sanitized_message", "")
@@ -365,9 +478,23 @@ def execute_tool(state: AgentState) -> AgentState:
             "input.message_preview": safe_preview(message),
         },
     ) as span:
-        result: dict[str, Any] | None
+        result: dict[str, Any] | list[dict[str, Any]] | None
         ticket_match = _TICKET_ID_RE.search(message)
-        if "ticket status" in message_lower or "check ticket" in message_lower or ticket_match:
+        if ticket_match is None and _mentions_list_all_tickets(message_lower):
+            tool_name = "list_tickets_for_user"
+            tickets = [
+                t.model_dump(mode="json") for t in list_tickets_for_user(state.get("user_id", ""))
+            ]
+            result = tickets
+            response_text = _describe_all_tickets(tickets)
+        elif (
+            "ticket status" in message_lower
+            or "check ticket" in message_lower
+            or "ticket open" in message_lower
+            or "have a ticket" in message_lower
+            or "have any ticket" in message_lower
+            or ticket_match
+        ):
             tool_name = "get_ticket_status"
             if ticket_match is None:
                 result = None
@@ -390,22 +517,42 @@ def execute_tool(state: AgentState) -> AgentState:
                     )
                 else:
                     result = get_ticket_status(ticket_id).model_dump(mode="json")
-                    response_text = _describe_tool_result(tool_name, result)
+                    if any(verb in message_lower for verb in _TICKET_MODIFY_VERBS):
+                        # They asked to close/finish/resolve it, not just
+                        # check it - silently answering with only the status
+                        # (as the old code did) reads like the request was
+                        # carried out when nothing actually happened to the
+                        # ticket. Say so plainly instead of leaving it
+                        # ambiguous, but still surface the real status since
+                        # that's genuinely useful context.
+                        response_text = (
+                            "I can check ticket status, but I can't close, complete, or resolve "
+                            f"a ticket myself - a human agent handles that. {_describe_tool_result(tool_name, result)}"
+                        )
+                    else:
+                        response_text = _describe_tool_result(tool_name, result)
         elif "reset password" in message_lower or "reset my password" in message_lower:
             tool_name = "request_password_reset"
             result = request_password_reset(user_id=state.get("user_id", "unknown"), reason=message)
             response_text = _describe_tool_result(tool_name, result)
-        elif "create ticket" in message_lower or "open ticket" in message_lower:
+        elif _mentions_create_ticket(message_lower):
             tool_name = "create_ticket"
+            category = _categorize_ticket(message)
             result = create_ticket(
                 tenant_id="default-tenant",
                 requester_user_id=state.get("user_id", "unknown"),
-                title="User-created support request",
+                title=_extract_ticket_title(message),
                 description=(message + " Additional details pending triage.")[:300],
-                category="general",
+                category=category,
                 priority="medium",
             )
-            response_text = _describe_tool_result(tool_name, result)
+            if result.get("status") == "created":
+                response_text = (
+                    f"Created ticket {result.get('ticket_id')} in the '{category}' category. "
+                    f"{result.get('message', '')}"
+                ).strip()
+            else:
+                response_text = _describe_tool_result(tool_name, result)
         else:
             tool_name = "none"
             result = {
@@ -415,7 +562,10 @@ def execute_tool(state: AgentState) -> AgentState:
             response_text = _describe_tool_result(tool_name, result)
 
         span.set_attribute("output.tool_name", tool_name)
-        span.set_attribute("output.status", result.get("status", "unknown") if isinstance(result, dict) else "unknown")
+        span.set_attribute(
+            "output.status",
+            result.get("status", "unknown") if isinstance(result, dict) else "unknown",
+        )
         span.set_attribute("output.result_preview", safe_preview(result))
 
         return {
@@ -481,15 +631,31 @@ _KNOWN_EMPLOYEE_NAMES = {
 }
 
 _DIRECT_RESPONSE_SYSTEM_PROMPT = (
-    "You are a friendly IT support assistant. The employee has sent a general "
-    "greeting or open-ended message rather than a specific request. Greet them "
-    "warmly by name if one is given (never invent a name if none is given), "
-    "then briefly describe what you can help with: checking ticket status, "
-    "creating a ticket, resetting a password, and answering IT policy "
-    "questions (VPN, security, hardware, licensing) grounded in real company "
-    "documents. Keep it to 2-3 short sentences, plain prose, no markdown "
-    "headings or bullet lists, no preamble. Never claim a capability not "
-    "listed here."
+    "You are an IT support assistant with exactly four capabilities: checking "
+    "ticket status, creating a ticket, resetting a password, and answering IT "
+    "policy questions (VPN, security, hardware, licensing) grounded in real "
+    "company documents. Nothing else is possible - you have no other tools.\n\n"
+    "If the employee's message is a general greeting or open-ended chat, greet "
+    "them warmly by name if one is given (never invent a name if none is "
+    "given), then briefly describe those four capabilities.\n\n"
+    "If the employee's message instead describes a specific need that is NOT "
+    "one of those four - for example requesting access or permissions to "
+    "something, asking you to look up account/employee/profile details, or "
+    "anything else outside the list - do not offer to process it, do not ask "
+    "clarifying questions about it, and do not imply you have any way to help "
+    "with it. Say plainly that it isn't something you can do, and suggest "
+    "opening a ticket so a human can handle it instead.\n\n"
+    "Your ONLY password capability is triggering an automatic reset link/MFA "
+    "challenge - it requires no input from the employee beyond asking for it. "
+    "You must NEVER ask an employee to type their current password, a new "
+    "password, a PIN, or a verification code into this chat, under any "
+    "circumstance, and must never claim you need one to proceed - there is no "
+    "such verification step and no tool that accepts one. If earlier messages "
+    "in this conversation show the employee already offered a password or "
+    "code, do not acknowledge or use it as a credential - just proceed with "
+    "the reset.\n\n"
+    "Keep it to 2-3 short sentences, plain prose, no markdown headings or "
+    "bullet lists, no preamble. Never claim a capability not listed here."
 )
 
 
@@ -522,8 +688,10 @@ def direct_response(state: AgentState) -> AgentState:
                 llm_span.set_attribute("output.provider", client.provider)
                 llm_span.set_attribute("output.model", client.model)
                 user_prompt = (
-                    f"The employee's first name is {name}.\n" if name else ""
-                ) + f"Employee message: {message}"
+                    (f"The employee's first name is {name}.\n" if name else "")
+                    + _format_recent_turns(state.get("session_history") or [])
+                    + f"Employee message: {message}"
+                )
                 llm_answer = client.generate(
                     system=_DIRECT_RESPONSE_SYSTEM_PROMPT,
                     user=user_prompt,
@@ -634,11 +802,22 @@ def _route_after_classify(
     return "direct_response"
 
 
-def _route_after_retrieval(state: AgentState) -> Literal["generate_grounded_answer", "escalate"]:
-    """Escalate when no grounding evidence is available."""
+def _route_after_retrieval(state: AgentState) -> Literal["generate_grounded_answer", "direct_response"]:
+    """Decline gracefully, not escalate, when no grounding evidence exists.
+
+    A question that merely isn't covered by any policy document (weather,
+    Mars mining policy, ...) isn't the same situation as someone explicitly
+    asking for a manager/human (see classify_intent's "escalation" intent,
+    routed to `escalate` directly) - it doesn't need a real person's time,
+    it just needs an honest "that's not something I can help with." Reusing
+    direct_response gives it the same LLM-generated, capability-aware
+    decline already used for off-topic direct messages, instead of a
+    separate "escalating to a human" message for what's really the same
+    situation.
+    """
     if state.get("retrieved_context"):
         return "generate_grounded_answer"
-    return "escalate"
+    return "direct_response"
 
 
 def build_graph():
@@ -688,7 +867,7 @@ def build_graph():
         _route_after_retrieval,
         {
             "generate_grounded_answer": "generate_grounded_answer",
-            "escalate": "escalate",
+            "direct_response": "direct_response",
         },
     )
 

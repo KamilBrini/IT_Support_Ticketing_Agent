@@ -9,8 +9,10 @@ and how results are rendered.
 
 from __future__ import annotations
 
+import base64
 import os
 import uuid
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -117,7 +119,7 @@ def inject_custom_css() -> None:
         div[data-testid="stStatusWidget"] { visibility: hidden; }
 
         /* Extra top padding clears the fixed FDM logo mark - see .fdm-logo. */
-        .block-container { padding-top: 4.5rem; max-width: 1200px; }
+        .block-container { padding-top: 5.5rem; max-width: 1200px; }
 
         /* --- "Thinking..." indicator (wraps the requests.post call in
            send_chat_message via st.spinner - see there for why) ---
@@ -193,13 +195,16 @@ def inject_custom_css() -> None:
                over wherever the two overlap, which is exactly the corner
                this logo lives in. */
             z-index: 999999;
-            background: #000000;
-            border: 1px solid #2A2A2A;
-            border-radius: 10px;
-            padding: 6px 12px;
+            /* No border/padding here on purpose - the logo PNG is already a
+               complete black square tile with its own margin baked in, so
+               wrapping it in another bordered box just double-frames it. */
             display: flex;
             align-items: center;
             flex-shrink: 0;
+        }
+        .fdm-logo img {
+            display: block;
+            border-radius: 8px;
         }
         [data-testid="stSidebar"] [data-testid="stSidebarUserContent"] { padding-top: 2.5rem; }
 
@@ -210,27 +215,39 @@ def inject_custom_css() -> None:
         }
         [data-testid="stSidebar"] h2 { font-size: 0.95rem; color: #F2F2F2; }
 
-        /* --- Buttons --- */
-        .stButton > button {
+        /* --- Buttons ---
+           .stFormSubmitButton alongside .stButton everywhere here: the chat
+           box's Send button is an st.form_submit_button, which Streamlit
+           wraps in a different class than a plain st.button - without this
+           it silently fell back to Streamlit's own default primary-button
+           styling (bright lime with white text) instead of this dark-on-
+           lime treatment, unreadable exactly like every other bright
+           lime-on-lime-ish combo on this page. Also [kind^="primary"], not
+           [kind="primary"]: a form_submit_button's actual kind attribute is
+           "primaryFormSubmit", not "primary" - an exact match silently
+           missed it entirely, which was the real reason the fix above
+           didn't take effect the first time (confirmed via the rendered
+           DOM: kind="primaryFormSubmit" on the Send button specifically). */
+        .stButton > button, .stFormSubmitButton > button {
             border-radius: 8px;
             border: 1px solid #2A2A2A;
             font-weight: 500;
             transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
         }
-        .stButton > button:hover {
+        .stButton > button:hover, .stFormSubmitButton > button:hover {
             border-color: #5FFB07;
             color: #5FFB07;
             transform: translateY(-1px);
             box-shadow: 0 4px 12px rgba(95, 251, 7, 0.18);
         }
-        .stButton > button[kind="primary"] {
+        .stButton > button[kind^="primary"], .stFormSubmitButton > button[kind^="primary"] {
             background: #5FFB07;
             border: none;
             color: #0D0D0D;
             font-weight: 700;
             box-shadow: 0 2px 10px rgba(95, 251, 7, 0.35);
         }
-        .stButton > button[kind="primary"]:hover {
+        .stButton > button[kind^="primary"]:hover, .stFormSubmitButton > button[kind^="primary"]:hover {
             background: #7CFF33;
             color: #0D0D0D;
         }
@@ -352,69 +369,91 @@ def send_chat_message(user_text: str) -> None:
     if not user_text.strip():
         return
 
-    user_message: dict[str, Any] = {"role": "user", "content": user_text}
-    st.session_state.messages.append(user_message)
-
-    payload = {
-        "user_id": st.session_state.user_id,
-        "session_id": st.session_state.session_id,
-        "user_message": user_text,
-    }
+    if st.session_state.get("_send_in_flight_text") == user_text:
+        # A duplicate trigger for a send that's already in progress - e.g.
+        # clicking Send, or a sidebar ticket chip, more than once before the
+        # first click's reply has come back (reproduced live: 2-3 rapid
+        # clicks produced 2-3 identical messages, because nothing stopped a
+        # second trigger from starting a second send while the first was
+        # still mid-flight). This is the single choke point every entry
+        # point calls through, so one guard here covers all of them rather
+        # than repeating it in each caller.
+        return
+    st.session_state["_send_in_flight_text"] = user_text
 
     try:
-        # 60s, not 30s: an occasional slow NVIDIA NIM response (cold start
-        # after idle time) can legitimately take 30-45s, and that shouldn't
-        # look like a broken app mid-demo. st.spinner wraps the blocking
-        # call so the "thinking" indicator (styled via CSS - see
-        # inject_custom_css) is up for exactly as long as the backend is
-        # actually working, from every trigger (chat box, ticket chips,
-        # reset button, demo scenarios) since they all funnel through here.
-        with st.spinner("Thinking..."):
-            response = requests.post(CHAT_ENDPOINT, json=payload, timeout=60)
-    except requests.RequestException as exc:
-        st.session_state.messages.append({
+        user_message: dict[str, Any] = {"role": "user", "content": user_text}
+        st.session_state.messages.append(user_message)
+
+        payload = {
+            "user_id": st.session_state.user_id,
+            "session_id": st.session_state.session_id,
+            "user_message": user_text,
+        }
+
+        try:
+            # 90s, not 60s: 60 was cutting it close for one specific case -
+            # the very first chat request after the backend restarts, for a
+            # user who has no long-term-memory collection yet, stacks three
+            # one-time costs (embedding model cold-load, ChromaDB collection
+            # creation, and an NVIDIA NIM cold start up to the documented
+            # ~45s worst case) that don't recur on any later request.
+            # Reproduced live: the backend's own log showed a 200 OK for the
+            # exact request the frontend had already given up on - it was
+            # never hung, just slower than 60s allowed for that one-time
+            # combination. st.spinner wraps the blocking call so the
+            # "thinking" indicator (styled via CSS - see inject_custom_css)
+            # is up for exactly as long as the backend is actually working,
+            # from every trigger (chat box, ticket chips, reset button, demo
+            # scenarios) since they all funnel through here.
+            with st.spinner("Thinking..."):
+                response = requests.post(CHAT_ENDPOINT, json=payload, timeout=90)
+        except requests.RequestException as exc:
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": "I could not connect to the backend service.",
+                "error": f"Could not reach API at {CHAT_ENDPOINT}. Details: {exc}",
+            })
+            return
+
+        if response.status_code == 422:
+            detail = response.json().get("detail", "Validation error")
+            if isinstance(detail, list):
+                detail = "; ".join(str(item) for item in detail)
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": "Your request did not pass validation.",
+                "error": f"Validation error: {detail}",
+            })
+            return
+
+        if not response.ok:
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": "The backend returned an error.",
+                "error": f"HTTP {response.status_code}: {response.text}",
+            })
+            return
+
+        data = response.json()
+        assistant_text = data.get("response", "No response returned.")
+        intent = str(data.get("intent", "")).lower()
+        tool_result = data.get("tool_result")
+        sanitized_message = data.get("sanitized_message")
+
+        if sanitized_message and sanitized_message != user_text:
+            user_message["redacted_preview"] = sanitized_message
+
+        assistant_message: dict[str, Any] = {
             "role": "assistant",
-            "content": "I could not connect to the backend service.",
-            "error": f"Could not reach API at {CHAT_ENDPOINT}. Details: {exc}",
-        })
-        return
-
-    if response.status_code == 422:
-        detail = response.json().get("detail", "Validation error")
-        if isinstance(detail, list):
-            detail = "; ".join(str(item) for item in detail)
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": "Your request did not pass validation.",
-            "error": f"Validation error: {detail}",
-        })
-        return
-
-    if not response.ok:
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": "The backend returned an error.",
-            "error": f"HTTP {response.status_code}: {response.text}",
-        })
-        return
-
-    data = response.json()
-    assistant_text = data.get("response", "No response returned.")
-    intent = str(data.get("intent", "")).lower()
-    tool_result = data.get("tool_result")
-    sanitized_message = data.get("sanitized_message")
-
-    if sanitized_message and sanitized_message != user_text:
-        user_message["redacted_preview"] = sanitized_message
-
-    assistant_message: dict[str, Any] = {
-        "role": "assistant",
-        "content": assistant_text,
-        "tool_result": tool_result,
-    }
-    if intent == "blocked":
-        assistant_message["error"] = "Request was blocked by injection/safety rules."
-    st.session_state.messages.append(assistant_message)
+            "content": assistant_text,
+            "tool_result": tool_result,
+        }
+        if intent == "blocked":
+            assistant_message["error"] = "Request was blocked by injection/safety rules."
+        st.session_state.messages.append(assistant_message)
+    finally:
+        st.session_state["_send_in_flight_text"] = None
 
 
 def send_and_notify(user_text: str, toast: str = "Sent") -> None:
@@ -577,6 +616,36 @@ with st.sidebar:
         st.button("Prepare request", on_click=_handle_reset_submit, type="primary")
 
     st.divider()
+    with st.expander("Create a new ticket"):
+        # Same plain-widgets + on_click pattern as "Reset my password" above
+        # (not st.form - see that comment). Routed through the same
+        # send_chat_message -> LangGraph path as typing "create ticket: ..."
+        # in the main chat box, not a separate backend call, so it gets the
+        # same auto-categorization, the same per-user ownership on every
+        # later lookup, and the same guardrails/tracing as everything else -
+        # switching the active employee already resets the chat and already
+        # blocks reading another user's ticket by ID (see execute_tool's
+        # ownership check), so that privacy guarantee already covers tickets
+        # created here too, with no extra code needed.
+        def _handle_new_ticket_submit() -> None:
+            description = st.session_state.get("new_ticket_input", "").strip()
+            if len(description) < 5:
+                st.session_state["_new_ticket_error"] = True
+                return
+            send_chat_message(f"Create ticket: {description}")
+            st.session_state.new_ticket_input = ""
+            st.toast("Ticket submitted", icon="🎫")
+
+        st.text_area(
+            "Describe your issue (5+ characters) - it'll be categorized automatically",
+            key="new_ticket_input",
+            height=80,
+        )
+        st.button("Submit ticket", on_click=_handle_new_ticket_submit, type="primary", key="new_ticket_submit_btn")
+        if st.session_state.pop("_new_ticket_error", False):
+            st.error("Please describe your issue in at least 5 characters.")
+
+    st.divider()
     st.caption("Trace Viewer")
     st.markdown(f"[Open trace viewer]({TRACE_VIEWER_URL})")
     st.caption("If tracing is disabled, this link may not show live spans.")
@@ -584,6 +653,14 @@ with st.sidebar:
 
 def render_tool_result(tool_result: Any) -> None:
     """Render known tool payloads as styled cards (same shape-detection logic as before)."""
+    if isinstance(tool_result, list):
+        # "list all my tickets" returns one dict per ticket - each has the
+        # same shape as a single get_ticket_status result, so just render
+        # one card per item instead of a separate list-rendering branch.
+        for item in tool_result:
+            render_tool_result(item)
+        return
+
     if not isinstance(tool_result, dict):
         return
 
@@ -655,15 +732,30 @@ def render_tool_result(tool_result: Any) -> None:
         )
 
 
-_FDM_LOGO_SVG = (
-    '<svg width="92" height="38" viewBox="0 0 140 60" xmlns="http://www.w3.org/2000/svg" '
-    'role="img" aria-label="FDM">'
-    '<text x="2" y="47" font-family="Arial, Helvetica, sans-serif" font-weight="900" '
-    'font-size="50" fill="#5FFB07" transform="skewX(-8)">FDM</text>'
-    '</svg>'
-)
+def _load_fdm_logo_data_uri() -> str | None:
+    """Base64-inline the real FDM logo asset (a small, self-contained PNG).
 
-st.markdown(f'<div class="fdm-logo">{_FDM_LOGO_SVG}</div>', unsafe_allow_html=True)
+    Inlined rather than served as a static file path - Streamlit has no
+    built-in static-file route for an arbitrary local path, and the file is
+    a few KB, trivial to embed directly in the injected <img> tag. Returns
+    None if the file isn't there yet so the page still renders instead of
+    crashing on a missing asset.
+    """
+    logo_path = Path(__file__).parent / "assets" / "FDMLOGO.png"
+    if not logo_path.is_file():
+        return None
+    encoded = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+_FDM_LOGO_DATA_URI = _load_fdm_logo_data_uri()
+
+if _FDM_LOGO_DATA_URI:
+    st.markdown(
+        f'<div class="fdm-logo"><img src="{_FDM_LOGO_DATA_URI}" alt="FDM" '
+        f'width="64" height="64" /></div>',
+        unsafe_allow_html=True,
+    )
 
 st.markdown(
     '''<div class="app-header">
@@ -720,15 +812,32 @@ with chat_panel:
         else:
             st.session_state["_chat_empty_error"] = True
 
-    st.text_input(
-        "Message",
-        key="chat_message_input",
-        placeholder="Describe your IT issue or policy question",
-        label_visibility="collapsed",
-    )
-    send_col, _spacer_col = st.columns([1, 5])
-    with send_col:
-        st.button("Send", on_click=_handle_chat_send, type="primary", use_container_width=True)
+    # st.form, not a text_input with on_change: on_change fires on ANY blur,
+    # not just Enter - clicking the Send button blurs the input first (a
+    # second, separate trigger on top of the button's own on_click, firing
+    # _handle_chat_send twice for one click), and alt-tabbing away with text
+    # still in the box was blurring - and therefore sending - it too. A form
+    # has exactly one submit trigger (Enter-in-field or the submit button),
+    # so neither false trigger exists. clear_on_submit=True was tried first
+    # and turned out to reset the field's session_state *before* the submit
+    # button's on_click callback runs - _handle_chat_send read the
+    # already-cleared "" value and silently sent nothing. Clearing it
+    # manually at the end of the callback (clear_on_submit=False) avoids
+    # depending on that ordering. Only one st.form on the whole page - the
+    # earlier "dual st.form" bug was specifically two forms coexisting, not
+    # forms in general.
+    with st.form("chat_send_form", clear_on_submit=False, border=False):
+        st.text_input(
+            "Message",
+            key="chat_message_input",
+            placeholder="Describe your IT issue or policy question",
+            label_visibility="collapsed",
+        )
+        send_col, _spacer_col = st.columns([1, 5])
+        with send_col:
+            st.form_submit_button(
+                "Send", on_click=_handle_chat_send, type="primary", use_container_width=True
+            )
 
 if st.session_state.pop("_chat_empty_error", False):
     st.error("Please enter a message before submitting.")
